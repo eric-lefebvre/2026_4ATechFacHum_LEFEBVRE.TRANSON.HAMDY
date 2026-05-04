@@ -1,0 +1,44 @@
+Mesurer la concentration avec 3 capteurs
+
+EDA
+
+Mesure : le niveau tonique de conductance cutanée (SCL)
+Concentration → SCL monte lentement et progressivement
+Chiffres :
+
+Repos : 2–5 µS
+Concentration légère : 5–10 µS
+Concentration intense : 10–20 µS
+
+
+Latence : 10–30 secondes après le début de la tâche
+Attention : toujours normaliser par rapport à une baseline individuelle
+
+
+ECG → HRV
+
+Mesure : intervalles R-R → RMSSD et ratio LF/HF
+Concentration → RMSSD chute, LF/HF monte
+Chiffres :
+
+RMSSD repos : 40–80 ms → concentration : 20–40 ms
+LF/HF repos : ~1 → concentration : >2
+HR repos : 60–70 bpm → concentration : 70–85 bpm
+
+
+Fenêtre d'analyse : minimum 60 secondes glissantes
+
+
+EMG
+
+Mesure : amplitude RMS du signal musculaire (trapèze ou avant-bras)
+Concentration → tonus musculaire de base augmente, même sans mouvement
+Chiffres : pas de valeurs absolues universelles — ce qui compte est la hausse relative du RMS par rapport au repos
+Attention : signal très bruité, à croiser obligatoirement avec l'accéléromètre
+
+
+Précision globale
+
+EMG seul : ~65%
+EDA seule : ~71%
+Les 3 combinés : ~85% (Liu et al., 2018)

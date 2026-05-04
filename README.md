@@ -12,3 +12,6 @@ Jeu de golf
   - AAC -> Visée
   - EMG -> Tir
   - EDA ou ECG -> Capte le stress
+
+# Pour la vidéo
+penser à faire le setup des capteurs
