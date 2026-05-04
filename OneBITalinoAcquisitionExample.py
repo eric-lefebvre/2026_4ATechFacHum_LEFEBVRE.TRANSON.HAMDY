@@ -1,7 +1,5 @@
 import platform
 import sys
-import plux
-
 
 osDic = {
     "Darwin": f"MacOS/Intel{''.join(platform.python_version().split('.')[:2])}",
@@ -25,8 +23,9 @@ if platform.mac_ver()[0] != "":
             exit()
 
 
-sys.path.append(f"PLUX-API-Python3/{osDic[platform.system()]}")
+sys.path.append(f"{osDic[platform.system()]}")
 
+import plux
 
 
 class NewDevice(plux.SignalsDev):
@@ -47,7 +46,7 @@ class NewDevice(plux.SignalsDev):
 def exampleAcquisition(
     address="98:D3:91:FD:69:DD",
     duration=20,
-    frequency=100,
+    frequency=1000,
     active_ports=[1, 2, 3, 4, 5, 6],
 ):  # time acquisition for each frequency
     """
