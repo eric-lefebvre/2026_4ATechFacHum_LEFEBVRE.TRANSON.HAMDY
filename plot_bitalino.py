@@ -15,24 +15,9 @@ class PlotDevice(plux.SignalsDev):
         self.nSeqs = []
         self.values = []
 
-        plt.ion()
-        self.fig, self.ax = plt.subplots()
-        self.line, = self.ax.plot([], [])
-        self.ax.set_xlabel("Numéro d'acquisition")
-        self.ax.set_ylabel("Valeur")
-        self.ax.set_title("Signal BITalino")
-
     def onRawFrame(self, nSeq, data):
         self.nSeqs.append(nSeq)
         self.values.append(data[0])
-
-        if nSeq % 50 == 0:  # rafraîchit le graphique toutes les 50 trames
-            self.line.set_data(self.nSeqs, self.values)
-            self.ax.relim()
-            self.ax.autoscale_view()
-            self.fig.canvas.draw()
-            self.fig.canvas.flush_events()
-
         return nSeq > self.duration * self.frequency
 
 
@@ -50,7 +35,10 @@ def acquisitionAvecGraphique(
     device.stop()
     device.close()
 
-    plt.ioff()
+    plt.plot(device.nSeqs, device.values)
+    plt.xlabel("Numéro d'acquisition")
+    plt.ylabel("Valeur")
+    plt.title("Signal BITalino")
     plt.show()
 
 
