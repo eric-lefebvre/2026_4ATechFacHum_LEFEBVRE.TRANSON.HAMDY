@@ -5,6 +5,7 @@ import threading
 from datetime import datetime
 import matplotlib.pyplot as plt
 from signal_processor import SignalProcessor
+from websocket_bridge import WebSocketBridge
 
 sys.path.append(f"Win{platform.architecture()[0][:2]}_{''.join(platform.python_version().split('.')[:2])}")
 import plux
@@ -22,11 +23,12 @@ PLOT_INTERVAL  = 0.2              # rafraîchissement du graphique (secondes)
 class Acquisition(plux.SignalsDev):
     """Tourne dans un thread séparé — ne touche jamais à matplotlib."""
 
-    def __init__(self, address):
+    def __init__(self, address, bridge: WebSocketBridge = None):
         plux.SignalsDev.__init__(address)
         self.frequency = FREQUENCY
         self.data      = [[] for _ in ACTIVE_PORTS]
         self.processor = SignalProcessor(frequency=FREQUENCY)
+        self.bridge    = bridge
         self.running   = True
 
     def onRawFrame(self, nSeq, data):
@@ -36,7 +38,25 @@ class Acquisition(plux.SignalsDev):
         # Traitement du signal
         frame  = {name: data[i] for i, name in enumerate(CHANNEL_NAMES)}
         result = self.processor.update(frame)
-        if result:
+        if result is None:
+            return not self.running
+
+        if self.bridge:
+            self.bridge.send(result)
+
+        msg_type = result.get("type", "data")
+
+        if msg_type == "calibration_progress":
+            print(f"[Calibration] {result['elapsed_sec']}s / {result['total_sec']}s"
+                  f"  ({int(result['progress'] * 100)}%)")
+
+        elif msg_type == "calibration_complete":
+            print(f"[Calibration OK] "
+                  f"FC repos={result['hr_rest']:.0f}bpm ({result['hr_label']})  "
+                  f"Resp repos={result['resp_rest']:.1f}bpm ({result['resp_label']})  "
+                  f"EDA baseline={result['eda_baseline']:.1f}")
+
+        elif msg_type == "data":
             if result["shot_triggered"]:
                 print(f"[TIR] puissance={result['shot_power']:.2f}  "
                       f"angle={result['aim_angle']:.1f}°  "
@@ -56,9 +76,12 @@ class Acquisition(plux.SignalsDev):
 
 
 def acquérir_et_afficher():
+    bridge = WebSocketBridge()
+    bridge.start()
+
     print(f"[Connexion] Tentative de connexion à {DEVICE_ADDRESS}...")
     try:
-        device = Acquisition(DEVICE_ADDRESS)
+        device = Acquisition(DEVICE_ADDRESS, bridge=bridge)
     except RuntimeError as e:
         print(f"[Erreur] Impossible de se connecter : {e}")
         print("[Erreur] Vérifiez que le BITalino est allumé et couplé en Bluetooth.")
@@ -132,6 +155,7 @@ def acquérir_et_afficher():
             writer.writerow([i] + list(row))
     print(f"[Export] Fichier créé : {filename}")
 
+    bridge.stop()
     plt.ioff()
     plt.show()
 

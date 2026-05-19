@@ -2,17 +2,31 @@
 Traitement du signal pour le projet mini-golf.
 
 Entrée  : trames brutes du Bitalino (entiers ADC 0–65535)
-Sortie  : valeurs utilisables par le jeu Unity
+Sortie  : messages typés pour Unity
 
-    shot_triggered  bool    le joueur vient de relâcher le muscle → tir
-    shot_power      0–1     force du tir (basée sur le pic EMG)
-    aim_angle       degrés  angle de visée dérivé de l'accéléromètre
-    stress          0–1     index de stress combiné (EDA + fréquence cardiaque)
-    breath_rate     bpm     fréquence respiratoire
+    type = "calibration_progress"   (1×/seconde pendant la calibration)
+        progress    0–1
+        elapsed_sec int
+        total_sec   int
+
+    type = "calibration_complete"   (1× à la fin de la calibration)
+        hr_rest     bpm     FC au repos individuelle
+        hr_label    str     "basse" / "normale" / "élevée" / "très élevée"
+        resp_rest   bpm     respiration au repos
+        resp_label  str     "lente" / "normale" / "rapide"
+        eda_baseline float  conductance cutanée au repos (valeur brute ADC)
+
+    type = "data"   (chaque trame après calibration)
+        shot_triggered  bool
+        shot_power      0–1
+        aim_angle       degrés
+        stress          0–1
+        heart_rate      bpm
+        breath_rate     bpm
 
 Fonctionnement :
-    1. Les 10 premières secondes = calibration (joueur au repos, immobile)
-    2. Ensuite chaque trame produit une sortie
+    1. Les 30 premières secondes = calibration (joueur au repos, immobile)
+    2. Ensuite chaque trame produit un message "data"
 """
 
 import math
@@ -20,7 +34,7 @@ from collections import deque
 
 # ── Paramètres ─────────────────────────────────────────────────────────
 FREQUENCY          = 100   # Hz — doit correspondre à acquisition.py
-CALIBRATION_SEC    = 10    # secondes de repos pour établir les baselines
+CALIBRATION_SEC    = 30    # secondes de repos pour établir les baselines
 
 EMG_WINDOW_MS      = 200   # fenêtre RMS pour l'EMG (ms)
 EMG_THRESHOLD_MULT = 4.0   # ratio baseline × N pour détecter une contraction
@@ -50,6 +64,10 @@ class SignalProcessor:
         self._eda_baseline  = 1.0
         self._acc_x_neutral = 512.0
         self._acc_z_neutral = 512.0
+
+        # Baselines individuelles FC/resp (mesurées pendant la calibration)
+        self._hr_rest   = 70.0   # bpm au repos — remplacé après calibration
+        self._resp_rest = 15.0   # bpm au repos — remplacé après calibration
 
         # Buffer EMG (fenêtre glissante)
         self._emg_buf = deque(maxlen=int(frequency * EMG_WINDOW_MS / 1000))
@@ -82,16 +100,14 @@ class SignalProcessor:
     def update(self, frame: dict) -> dict | None:
         """
         Appeler à chaque trame reçue du Bitalino.
-        Retourne None pendant la calibration, puis un dict de valeurs.
-
-        frame doit contenir les clés :
-            acc_x, acc_z, resp, pzt, eda, emg
+        Retourne None la plupart du temps pendant la calibration,
+        un message typé 1×/seconde (progress / complete),
+        puis un message "data" à chaque trame après calibration.
         """
         self._frame_count += 1
 
         if not self.calibrated:
-            self._run_calibration(frame)
-            return None      # pas encore de sortie pendant la calibration
+            return self._run_calibration(frame)
 
         shot_triggered, shot_power = self._process_emg(frame["emg"])
         aim_angle                  = self._process_acc(frame["acc_x"], frame["acc_z"])
@@ -100,6 +116,7 @@ class SignalProcessor:
         stress                     = self._process_stress(frame["eda"], heart_rate)
 
         return {
+            "type":           "data",
             "shot_triggered": shot_triggered,
             "shot_power":     round(shot_power, 3),
             "aim_angle":      round(aim_angle, 1),
@@ -109,25 +126,59 @@ class SignalProcessor:
         }
 
     # ── Calibration ─────────────────────────────────────────────────────
-    def _run_calibration(self, frame):
+    def _run_calibration(self, frame) -> dict | None:
         self._cal_emg.append(frame["emg"])
         self._cal_eda.append(frame["eda"])
         self._cal_accx.append(frame["acc_x"])
         self._cal_accz.append(frame["acc_z"])
         self._cal_count += 1
 
+        # PZT et RESP tournent pour mesurer les valeurs au repos de ce sujet
+        self._process_pzt(frame["pzt"])
+        self._process_resp(frame["resp"])
+
+        # Rapport 1 fois par seconde seulement
+        if self._cal_count % self.freq != 0:
+            return None
+
+        elapsed  = self._cal_count // self.freq
+        progress = self._cal_count / self._cal_target
+
+        # Fin de calibration
         if self._cal_count >= self._cal_target:
             self._emg_baseline  = _rms(self._cal_emg) or 1.0
             self._eda_baseline  = _mean(self._cal_eda) or 1.0
             self._acc_x_neutral = _mean(self._cal_accx)
             self._acc_z_neutral = _mean(self._cal_accz)
-            self.calibrated = True
+            self._hr_rest       = self._heart_rate_bpm
+            self._resp_rest     = self._breath_rate
+            self.calibrated     = True
+
             print(
                 f"[Calibration OK] "
-                f"EMG baseline RMS={self._emg_baseline:.1f}  "
+                f"FC repos={self._hr_rest:.0f}bpm ({_hr_label(self._hr_rest)})  "
+                f"Resp repos={self._resp_rest:.1f}bpm ({_resp_label(self._resp_rest)})  "
                 f"EDA baseline={self._eda_baseline:.1f}  "
+                f"EMG baseline={self._emg_baseline:.1f}  "
                 f"ACC neutre=({self._acc_x_neutral:.0f}, {self._acc_z_neutral:.0f})"
             )
+            return {
+                "type":         "calibration_complete",
+                "hr_rest":      round(self._hr_rest, 1),
+                "hr_label":     _hr_label(self._hr_rest),
+                "resp_rest":    round(self._resp_rest, 1),
+                "resp_label":   _resp_label(self._resp_rest),
+                "eda_baseline": round(self._eda_baseline, 1),
+            }
+
+        # Progression en cours
+        print(f"[Calibration] {elapsed}s / {CALIBRATION_SEC}s  ({int(progress * 100)}%)")
+        return {
+            "type":        "calibration_progress",
+            "progress":    round(progress, 2),
+            "elapsed_sec": elapsed,
+            "total_sec":   CALIBRATION_SEC,
+        }
 
     # ── EMG → tir ───────────────────────────────────────────────────────
     def _process_emg(self, raw):
@@ -242,9 +293,10 @@ class SignalProcessor:
         else:
             eda_stress = 0.0   # EDA non disponible
 
-        # Composante fréquence cardiaque
-        # Repos ~60–70 bpm → stress 0 ; > 100 bpm → stress 1
-        hr_stress = min(1.0, max(0.0, (heart_rate - 65) / 40.0))
+        # Composante fréquence cardiaque — normalisée par rapport au repos individuel
+        # 0 = FC au repos, 1 = FC repos + 50 % (ex : 70 bpm repos → 1 atteint à 105 bpm)
+        hr_range  = self._hr_rest * 0.5
+        hr_stress = min(1.0, max(0.0, (heart_rate - self._hr_rest) / hr_range))
 
         # Combinaison pondérée (60 % HR, 40 % EDA)
         stress = 0.6 * hr_stress + 0.4 * eda_stress
@@ -262,3 +314,14 @@ def _mean(values) -> float:
     if not values:
         return 0.0
     return sum(values) / len(values)
+
+def _hr_label(bpm: float) -> str:
+    if bpm < 55:  return "basse"
+    if bpm < 80:  return "normale"
+    if bpm < 100: return "élevée"
+    return "très élevée"
+
+def _resp_label(bpm: float) -> str:
+    if bpm < 10:  return "lente"
+    if bpm <= 20: return "normale"
+    return "rapide"
