@@ -1,6 +1,7 @@
 import platform
 import sys
 import csv
+import threading
 from datetime import datetime
 import matplotlib.pyplot as plt
 from signal_processor import SignalProcessor
@@ -13,38 +14,27 @@ DEVICE_ADDRESS = "98:D3:91:FD:69:DD"
 FREQUENCY      = 100   # Hz
 ACTIVE_PORTS   = [1, 2, 3, 4, 5, 6]
 CHANNEL_NAMES  = ["acc_x", "acc_z", "resp", "pzt", "eda", "emg"]
-WINDOW_SAMPLES = FREQUENCY * 5      # fenêtre glissante : 5 dernières secondes
+WINDOW_SAMPLES = FREQUENCY * 5   # fenêtre glissante : 5 dernières secondes
+PLOT_INTERVAL  = 0.2              # rafraîchissement du graphique (secondes)
 # ───────────────────────────────────────────────────────────────────────
 
 
 class Acquisition(plux.SignalsDev):
+    """Tourne dans un thread séparé — ne touche jamais à matplotlib."""
+
     def __init__(self, address):
         plux.SignalsDev.__init__(address)
-        self.frequency = 0
-        self.data = [[] for _ in ACTIVE_PORTS]
+        self.frequency = FREQUENCY
+        self.data      = [[] for _ in ACTIVE_PORTS]
         self.processor = SignalProcessor(frequency=FREQUENCY)
-
-        print("[Graphique] Ouverture de la fenêtre...")
-        plt.ion()
-        n = len(ACTIVE_PORTS)
-        self.fig, axes = plt.subplots(n, 1, figsize=(10, 3 * n))
-        self.axes  = [axes] if n == 1 else list(axes)
-        self.lines = []
-        for ax, name in zip(self.axes, CHANNEL_NAMES):
-            line, = ax.plot([], [])
-            ax.set_title(name)
-            ax.set_ylabel("Valeur brute")
-            self.lines.append(line)
-        self.axes[-1].set_xlabel("Échantillon")
-        plt.tight_layout()
-        plt.show()
+        self.running   = True
 
     def onRawFrame(self, nSeq, data):
         for i in range(len(ACTIVE_PORTS)):
             self.data[i].append(data[i])
 
         # Traitement du signal
-        frame = {name: data[i] for i, name in enumerate(CHANNEL_NAMES)}
+        frame  = {name: data[i] for i, name in enumerate(CHANNEL_NAMES)}
         result = self.processor.update(frame)
         if result:
             if result["shot_triggered"]:
@@ -60,19 +50,9 @@ class Acquisition(plux.SignalsDev):
         # Log toutes les 10 secondes
         if nSeq % (self.frequency * 10) == 0 and nSeq > 0:
             total = nSeq + 1
-            print(f"[Acquisition] {total} échantillons reçus ({total // self.frequency}s)")
+            print(f"[Acquisition] {total} échantillons ({total // self.frequency}s)")
 
-        # Rafraîchir le graphique 10 fois par seconde
-        if nSeq % (self.frequency // 10) == 0:
-            for i, (line, ax) in enumerate(zip(self.lines, self.axes)):
-                y = self.data[i][-WINDOW_SAMPLES:]
-                line.set_data(range(len(y)), y)
-                ax.relim()
-                ax.autoscale_view()
-            self.fig.canvas.draw()
-            self.fig.canvas.flush_events()
-
-        return False  # ne s'arrête jamais tout seul — Ctrl+C pour stopper
+        return not self.running  # s'arrête quand running=False
 
 
 def acquérir_et_afficher():
@@ -87,18 +67,57 @@ def acquérir_et_afficher():
     print(f"[Connexion] Connecté. Démarrage de l'acquisition sur ports {ACTIVE_PORTS}.")
     print("[Acquisition] Appuyez sur Ctrl+C pour arrêter.\n")
 
+    # ── Graphique (thread principal) ───────────────────────────────────
+    print("[Graphique] Ouverture de la fenêtre...")
+    n = len(ACTIVE_PORTS)
+    fig, axes = plt.subplots(n, 1, figsize=(10, 3 * n))
+    axes  = [axes] if n == 1 else list(axes)
+    lines = []
+    for ax, name in zip(axes, CHANNEL_NAMES):
+        line, = ax.plot([], [])
+        ax.set_title(name)
+        ax.set_ylabel("Valeur brute")
+        lines.append(line)
+    axes[-1].set_xlabel("Échantillon")
+    plt.tight_layout()
+    plt.ion()
+    plt.show()
+
+    # ── Acquisition (thread séparé) ────────────────────────────────────
+    def run_acquisition():
+        try:
+            device.start(FREQUENCY, ACTIVE_PORTS, 16)
+            device.loop()
+        except Exception as e:
+            if device.running:
+                print(f"\n[Erreur] Problème pendant l'acquisition : {e}")
+        finally:
+            try:
+                device.stop()
+                device.close()
+            except Exception:
+                pass
+            print("[Connexion] Déconnecté du BITalino.")
+
+    acq_thread = threading.Thread(target=run_acquisition, daemon=True)
+    acq_thread.start()
+
+    # ── Boucle graphique (thread principal) ───────────────────────────
     try:
-        device.start(FREQUENCY, ACTIVE_PORTS, 16)
-        device.loop()
+        while acq_thread.is_alive():
+            for i, (line, ax) in enumerate(zip(lines, axes)):
+                y = device.data[i][-WINDOW_SAMPLES:]
+                line.set_data(range(len(y)), y)
+                ax.relim()
+                ax.autoscale_view()
+            fig.canvas.draw()
+            plt.pause(PLOT_INTERVAL)
     except KeyboardInterrupt:
         print("\n[Acquisition] Arrêt demandé.")
-    except Exception as e:
-        print(f"\n[Erreur] Problème pendant l'acquisition : {e}")
-    finally:
-        device.stop()
-        device.close()
-        print("[Connexion] Déconnecté du BITalino.")
+        device.running = False
+        acq_thread.join(timeout=3)
 
+    # ── Export CSV ─────────────────────────────────────────────────────
     n_samples = len(device.data[0])
     if n_samples == 0:
         print("[Export] Aucune donnée reçue, pas de fichier créé.")
