@@ -3,6 +3,7 @@ import sys
 import csv
 from datetime import datetime
 import matplotlib.pyplot as plt
+from signal_processor import SignalProcessor
 
 sys.path.append(f"Win{platform.architecture()[0][:2]}_{''.join(platform.python_version().split('.')[:2])}")
 import plux
@@ -21,6 +22,7 @@ class Acquisition(plux.SignalsDev):
         plux.SignalsDev.__init__(address)
         self.frequency = 0
         self.data = [[] for _ in ACTIVE_PORTS]
+        self.processor = SignalProcessor(frequency=FREQUENCY)
 
         print("[Graphique] Ouverture de la fenêtre...")
         plt.ion()
@@ -40,6 +42,20 @@ class Acquisition(plux.SignalsDev):
     def onRawFrame(self, nSeq, data):
         for i in range(len(ACTIVE_PORTS)):
             self.data[i].append(data[i])
+
+        # Traitement du signal
+        frame = {name: data[i] for i, name in enumerate(CHANNEL_NAMES)}
+        result = self.processor.update(frame)
+        if result:
+            if result["shot_triggered"]:
+                print(f"[TIR] puissance={result['shot_power']:.2f}  "
+                      f"angle={result['aim_angle']:.1f}°  "
+                      f"stress={result['stress']:.2f}")
+            elif nSeq % (self.frequency * 2) == 0:
+                print(f"[Live] stress={result['stress']:.2f}  "
+                      f"FC={result['heart_rate']:.0f}bpm  "
+                      f"resp={result['breath_rate']:.1f}bpm  "
+                      f"angle={result['aim_angle']:.1f}°")
 
         # Log toutes les 10 secondes
         if nSeq % (self.frequency * 10) == 0 and nSeq > 0:
