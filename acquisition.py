@@ -1,6 +1,7 @@
 import platform
 import sys
 import csv
+import signal
 import threading
 from datetime import datetime
 import matplotlib.pyplot as plt
@@ -125,17 +126,22 @@ def acquérir_et_afficher():
     acq_thread = threading.Thread(target=run_acquisition, daemon=True)
     acq_thread.start()
 
+    # Ctrl+C intercepté proprement avant que Tkinter ne le reçoive
+    stop_event = threading.Event()
+    signal.signal(signal.SIGINT, lambda *_: stop_event.set())
+
     # ── Boucle graphique (thread principal) ───────────────────────────
-    try:
-        while acq_thread.is_alive():
-            for i, (line, ax) in enumerate(zip(lines, axes)):
-                y = device.data[i][-WINDOW_SAMPLES:]
-                line.set_data(range(len(y)), y)
-                ax.relim()
-                ax.autoscale_view()
-            fig.canvas.draw()
-            plt.pause(PLOT_INTERVAL)
-    except KeyboardInterrupt:
+    while acq_thread.is_alive() and not stop_event.is_set():
+        for i, (line, ax) in enumerate(zip(lines, axes)):
+            y = device.data[i][-WINDOW_SAMPLES:]
+            line.set_data(range(len(y)), y)
+            ax.relim()
+            ax.autoscale_view()
+        fig.canvas.draw()
+        fig.canvas.flush_events()
+        stop_event.wait(PLOT_INTERVAL)  # pause interruptible
+
+    if stop_event.is_set():
         print("\n[Acquisition] Arrêt demandé.")
         device.running = False
         acq_thread.join(timeout=3)

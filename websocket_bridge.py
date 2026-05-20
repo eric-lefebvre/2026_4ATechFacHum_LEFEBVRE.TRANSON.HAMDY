@@ -68,8 +68,8 @@ class WebSocketBridge:
         self._thread.start()
 
     def stop(self):
-        if self._loop:
-            self._loop.call_soon_threadsafe(self._loop.stop)
+        if self._loop and hasattr(self, '_stop_event'):
+            self._loop.call_soon_threadsafe(self._stop_event.set)
 
     # ── Envoi thread-safe ──────────────────────────────────────────────
 
@@ -112,13 +112,14 @@ class WebSocketBridge:
 
     def _run_loop(self):
         asyncio.set_event_loop(self._loop)
+        self._stop_event = asyncio.Event()
         self._loop.run_until_complete(self._serve())
 
     async def _serve(self):
         async with websockets.serve(self._handler, self._host, self._port):
             print(f"[WebSocket] Serveur démarré → ws://{self._host}:{self._port}  "
                   f"({1/self._send_interval:.0f} Hz)")
-            await asyncio.Future()  # tourne indéfiniment
+            await self._stop_event.wait()  # attend jusqu'à stop()
 
     async def _handler(self, websocket):
         self._clients.add(websocket)

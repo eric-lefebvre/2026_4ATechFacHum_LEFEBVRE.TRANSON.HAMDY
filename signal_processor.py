@@ -80,18 +80,18 @@ class SignalProcessor:
         self._eda_buf = deque(maxlen=frequency * EDA_WINDOW_SEC)
 
         # Buffer et état PZT (pouls)
-        self._pzt_buf        = deque(maxlen=frequency * PZT_WINDOW_SEC)
-        self._pzt_prev       = 0
-        self._pzt_rising     = False
-        self._pzt_peaks      = deque(maxlen=20)   # timestamps des derniers pics
-        self._heart_rate_bpm = 70.0               # valeur par défaut
+        self._pzt_buf             = deque(maxlen=frequency * PZT_WINDOW_SEC)
+        self._pzt_rising          = False
+        self._pzt_peaks           = deque(maxlen=20)
+        self._pzt_last_peak_frame = 0
+        self._heart_rate_bpm      = 70.0
 
         # Buffer et état RESP (respiration)
-        self._resp_buf       = deque(maxlen=frequency * RESP_WINDOW_SEC)
-        self._resp_prev      = 0
-        self._resp_rising    = False
-        self._resp_peaks     = deque(maxlen=10)   # timestamps des derniers cycles
-        self._breath_rate    = 15.0               # valeur par défaut (bpm)
+        self._resp_buf             = deque(maxlen=frequency * RESP_WINDOW_SEC)
+        self._resp_rising          = False
+        self._resp_peaks           = deque(maxlen=10)
+        self._resp_last_peak_frame = 0
+        self._breath_rate          = 15.0
 
         # Compteur global de trames (pour horodatage interne)
         self._frame_count = 0
@@ -111,8 +111,10 @@ class SignalProcessor:
 
         shot_triggered, shot_power = self._process_emg(frame["emg"])
         aim_angle                  = self._process_acc(frame["acc_x"], frame["acc_z"])
-        heart_rate                 = self._process_pzt(frame["pzt"])
-        breath_rate                = self._process_resp(frame["resp"])
+        debug_pzt  = (self._frame_count % 50 == 0)
+        debug_resp = (self._frame_count % 50 == 0)
+        heart_rate  = self._process_pzt(frame["pzt"], debug=debug_pzt)
+        breath_rate = self._process_resp(frame["resp"], debug=debug_resp)
         stress                     = self._process_stress(frame["eda"], heart_rate)
 
         return {
@@ -214,7 +216,7 @@ class SignalProcessor:
         return angle
 
     # ── PZT → fréquence cardiaque ────────────────────────────────────────
-    def _process_pzt(self, raw):
+    def _process_pzt(self, raw, debug=False):
         self._pzt_buf.append(raw)
 
         # Détection de pic : on cherche un passage par un maximum local
@@ -222,22 +224,30 @@ class SignalProcessor:
         if len(self._pzt_buf) < 10:
             return self._heart_rate_bpm
 
-        buf_list = list(self._pzt_buf)
-        mean_pzt = _mean(buf_list)
-        amp_pzt  = max(buf_list) - min(buf_list)
-        peak_threshold = mean_pzt + 0.3 * amp_pzt
+        buf_sorted = sorted(self._pzt_buf)
+        n = len(buf_sorted)
+        median_pzt = buf_sorted[n // 2]
+        amp_pzt    = buf_sorted[int(n * 0.9)] - buf_sorted[int(n * 0.1)]
+        peak_threshold = median_pzt + 0.4 * amp_pzt
+
+        if debug:
+            print(f"[PZT] raw={raw}  median={median_pzt:.0f}  amp={amp_pzt:.0f}  "
+                  f"threshold={peak_threshold:.0f}  rising={self._pzt_rising}")
 
         # Détection front montant → descendant (pic)
         if raw > peak_threshold and not self._pzt_rising:
             self._pzt_rising = True
         elif raw < peak_threshold and self._pzt_rising:
-            # On vient de passer le pic
             self._pzt_rising = False
-            t = self._frame_count / self.freq    # timestamp en secondes
+            # Période réfractaire : ignorer si un pic a déjà été vu récemment
+            frames_since_last = self._frame_count - self._pzt_last_peak_frame
+            if frames_since_last < self.freq * 0.35:
+                return self._heart_rate_bpm
+            self._pzt_last_peak_frame = self._frame_count
+            t = self._frame_count / self.freq
 
             if self._pzt_peaks:
                 interval = t - self._pzt_peaks[-1]
-                # Intervalle physiologique valide : 0.4 s – 1.5 s (40–150 bpm)
                 if 0.4 < interval < 1.5:
                     self._pzt_peaks.append(t)
                     if len(self._pzt_peaks) >= 2:
@@ -250,26 +260,36 @@ class SignalProcessor:
         return self._heart_rate_bpm
 
     # ── RESP → fréquence respiratoire ────────────────────────────────────
-    def _process_resp(self, raw):
+    def _process_resp(self, raw, debug=False):
         self._resp_buf.append(raw)
 
         if len(self._resp_buf) < 20:
             return self._breath_rate
 
-        buf_list = list(self._resp_buf)
-        mean_resp = _mean(buf_list)
-        amp_resp  = max(buf_list) - min(buf_list)
-        threshold = mean_resp + 0.2 * amp_resp
+        buf_sorted = sorted(self._resp_buf)
+        n = len(buf_sorted)
+        median_resp = buf_sorted[n // 2]
+        amp_resp    = buf_sorted[int(n * 0.9)] - buf_sorted[int(n * 0.1)]
+        threshold   = median_resp + 0.3 * amp_resp
+
+        if debug:
+            print(f"[RESP] raw={raw}  median={median_resp:.0f}  amp={amp_resp:.0f}  "
+                  f"threshold={threshold:.0f}  rising={self._resp_rising}  "
+                  f"rate={self._breath_rate:.1f}bpm  peaks={len(self._resp_peaks)}")
 
         if raw > threshold and not self._resp_rising:
             self._resp_rising = True
         elif raw < threshold and self._resp_rising:
             self._resp_rising = False
+            # Période réfractaire : 2s minimum entre deux cycles
+            frames_since_last = self._frame_count - self._resp_last_peak_frame
+            if frames_since_last < self.freq * 2.0:
+                return self._breath_rate
+            self._resp_last_peak_frame = self._frame_count
             t = self._frame_count / self.freq
 
             if self._resp_peaks:
                 interval = t - self._resp_peaks[-1]
-                # Intervalle respiratoire valide : 2 s – 10 s (6–30 bpm)
                 if 2.0 < interval < 10.0:
                     self._resp_peaks.append(t)
                     if len(self._resp_peaks) >= 2:
