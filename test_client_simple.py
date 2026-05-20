@@ -1,8 +1,8 @@
 """
-Client de test WebSocket pour acquisition.py (tous capteurs).
-Lance acquisition.py d'abord, puis ce script dans un autre terminal.
+Client de test WebSocket pour acquisition_simple.py (1+ capteur).
+Lance acquisition_simple.py d'abord, puis ce script dans un autre terminal.
 
-    python test_client.py
+    python test_client_simple.py
 """
 
 import asyncio
@@ -13,7 +13,7 @@ URI = "ws://localhost:8765"
 
 
 def _bar(value: float, width: int = 20, fill="█", empty="░") -> str:
-    n = round(value * width)
+    n = round(max(0.0, min(1.0, value)) * width)
     return fill * n + empty * (width - n)
 
 
@@ -28,7 +28,7 @@ async def main():
 
                 if t == "calibration_progress":
                     pct = int(msg["progress"] * 100)
-                    bar = _bar(msg["progress"])
+                    bar = "█" * (pct // 5) + "░" * (20 - pct // 5)
                     print(f"\r  [{bar}] {msg['elapsed_sec']:2d}s / {msg['total_sec']}s  {pct:3d}%",
                           end="", flush=True)
 
@@ -37,33 +37,28 @@ async def main():
                     print("╔══════════════════════════════════════╗")
                     print("║         CALIBRATION TERMINÉE         ║")
                     print("╠══════════════════════════════════════╣")
-                    print(f"║  FC au repos   : {msg['hr_rest']:5.1f} bpm  ({msg['hr_label']:<12})║")
-                    print(f"║  Resp au repos : {msg['resp_rest']:5.1f} bpm  ({msg['resp_label']:<12})║")
-                    print(f"║  EDA baseline  : {msg['eda_baseline']:5.1f}              ║")
+                    for ch, b in msg["baselines"].items():
+                        rate = b.get("rate", 0.0)
+                        amp  = b.get("amp",  0.0)
+                        print(f"║  {ch:<6}  repos : {rate:4.1f} cyc/min  amp={amp:<6.0f} ║")
                     print("╠══════════════════════════════════════╣")
                     print("║         ► Prêt à jouer ◄             ║")
                     print("╚══════════════════════════════════════╝")
                     print()
 
                 elif t == "data":
-                    if msg["shot_triggered"]:
-                        power_bar = _bar(msg["shot_power"])
-                        print(f"\n  ★ TIR !  puissance=[{power_bar}] {msg['shot_power']:.2f}"
-                              f"  angle={msg['aim_angle']:+.1f}°"
-                              f"  stress={msg['stress']:.2f}")
-                    else:
-                        stress_bar = _bar(msg["stress"])
-                        print(
-                            f"\r  stress=[{stress_bar}] {msg['stress']:.2f}"
-                            f"  FC={msg['heart_rate']:5.1f}bpm"
-                            f"  resp={msg['breath_rate']:4.1f}bpm"
-                            f"  angle={msg['aim_angle']:+6.1f}°  ",
-                            end="", flush=True,
-                        )
+                    channels = [k for k in msg if k != "type" and not k.endswith(("_rate", "_force"))]
+                    lines = []
+                    for ch in channels:
+                        rate  = msg.get(f"{ch}_rate",  0.0)
+                        force = msg.get(f"{ch}_force", 0.0)
+                        bar   = _bar(force)
+                        lines.append(f"{ch}: {rate:5.1f} cyc/min  force=[{bar}] {force:.2f}")
+                    print(f"\r  {'  |  '.join(lines)}  ", end="", flush=True)
 
     except ConnectionRefusedError:
         print("[TestClient] Impossible de se connecter.")
-        print("  → Lance d'abord acquisition.py dans un autre terminal.")
+        print("  → Lance d'abord acquisition_simple.py dans un autre terminal.")
     except KeyboardInterrupt:
         print("\n[TestClient] Arrêt.")
 

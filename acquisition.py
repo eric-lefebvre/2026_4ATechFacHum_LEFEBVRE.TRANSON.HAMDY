@@ -36,7 +36,6 @@ class Acquisition(plux.SignalsDev):
         for i in range(len(ACTIVE_PORTS)):
             self.data[i].append(data[i])
 
-        # Traitement du signal
         frame  = {name: data[i] for i, name in enumerate(CHANNEL_NAMES)}
         result = self.processor.update(frame)
         if result is None:
@@ -68,12 +67,11 @@ class Acquisition(plux.SignalsDev):
                       f"resp={result['breath_rate']:.1f}bpm  "
                       f"angle={result['aim_angle']:.1f}°")
 
-        # Log toutes les 10 secondes
         if nSeq % (self.frequency * 10) == 0 and nSeq > 0:
             total = nSeq + 1
             print(f"[Acquisition] {total} échantillons ({total // self.frequency}s)")
 
-        return not self.running  # s'arrête quand running=False
+        return not self.running
 
 
 def acquérir_et_afficher():
@@ -91,8 +89,6 @@ def acquérir_et_afficher():
     print(f"[Connexion] Connecté. Démarrage de l'acquisition sur ports {ACTIVE_PORTS}.")
     print("[Acquisition] Appuyez sur Ctrl+C pour arrêter.\n")
 
-    # ── Graphique (thread principal) ───────────────────────────────────
-    print("[Graphique] Ouverture de la fenêtre...")
     n = len(ACTIVE_PORTS)
     fig, axes = plt.subplots(n, 1, figsize=(10, 3 * n))
     axes  = [axes] if n == 1 else list(axes)
@@ -107,7 +103,6 @@ def acquérir_et_afficher():
     plt.ion()
     plt.show()
 
-    # ── Acquisition (thread séparé) ────────────────────────────────────
     def run_acquisition():
         try:
             device.start(FREQUENCY, ACTIVE_PORTS, 16)
@@ -126,11 +121,9 @@ def acquérir_et_afficher():
     acq_thread = threading.Thread(target=run_acquisition, daemon=True)
     acq_thread.start()
 
-    # Ctrl+C intercepté proprement avant que Tkinter ne le reçoive
     stop_event = threading.Event()
     signal.signal(signal.SIGINT, lambda *_: stop_event.set())
 
-    # ── Boucle graphique (thread principal) ───────────────────────────
     while acq_thread.is_alive() and not stop_event.is_set():
         for i, (line, ax) in enumerate(zip(lines, axes)):
             y = device.data[i][-WINDOW_SAMPLES:]
@@ -139,14 +132,13 @@ def acquérir_et_afficher():
             ax.autoscale_view()
         fig.canvas.draw()
         fig.canvas.flush_events()
-        stop_event.wait(PLOT_INTERVAL)  # pause interruptible
+        stop_event.wait(PLOT_INTERVAL)
 
     if stop_event.is_set():
         print("\n[Acquisition] Arrêt demandé.")
         device.running = False
         acq_thread.join(timeout=3)
 
-    # ── Export CSV ─────────────────────────────────────────────────────
     n_samples = len(device.data[0])
     if n_samples == 0:
         print("[Export] Aucune donnée reçue, pas de fichier créé.")
