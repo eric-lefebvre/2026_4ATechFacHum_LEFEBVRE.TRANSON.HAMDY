@@ -26,14 +26,13 @@ import threading
 import time
 import websockets
 
-# Plages physiologiques valides — valeurs hors plage → remplacées par
-# la dernière valeur valide connue (stratégie "hold-last-valid")
+# Plages pour les valeurs DÉRIVÉES uniquement (formules pouvant déborder).
+# heart_rate et breath_rate sont déjà validés par les filtres d'intervalle
+# du signal_processor — les filtrer ici provoquerait un gel sur les défauts.
 DEFAULT_BOUNDS = {
-    "heart_rate":  (30,  200),   # bpm
-    "breath_rate": ( 4,   40),   # bpm
-    "stress":      ( 0,    1),   # normalisé
-    "shot_power":  ( 0,    1),   # normalisé
-    "aim_angle":   (-180, 180),  # degrés
+    "stress":    (0,    1),   # normalisé
+    "shot_power":(0,    1),   # normalisé
+    "aim_angle": (-180, 180), # degrés
 }
 
 
