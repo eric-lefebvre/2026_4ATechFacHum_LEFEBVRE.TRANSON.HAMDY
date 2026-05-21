@@ -1,22 +1,19 @@
 """
-Version simplifiée — fonctionne avec n'importe quel sous-ensemble de capteurs.
+Version test — fonctionne avec n'importe quel sous-ensemble de capteurs.
+Pas de calcul de stress. Chaque capteur produit uniquement ses métriques propres.
 
-Calibration 30s : mesure la baseline et le taux de pics au repos.
-Après calibration : envoie en temps réel à Unity pour chaque canal :
-    {ch}_rate   — cycles par minute (respirations, battements…)
-    {ch}_force  — force relative 0–1 (1 = amplitude max mesurée à la calibration)
-
-Message Unity exemple (RESP seul) :
-    {
-        "type":       "data",
-        "resp":       45231,
-        "resp_rate":  14.2,
-        "resp_force": 0.73
-    }
+Sorties selon les capteurs branchés :
+    pzt   → heart_rate (bpm), heart_rate_variability (ms RMSSD)
+    resp  → breath_rate (bpm), breath_amp_min, breath_amp_max
+    eda   → eda_level (moyenne glissante 10s)
+    acc_x + acc_z (les deux requis) → aim_angle (degrés)
+    emg   → shot_triggered (bool), shot_power (0–1)
 
 Pour changer les capteurs branchés, modifier ACTIVE_PORTS et CHANNEL_NAMES.
+Ports disponibles : A1=acc_x  A2=acc_z  A3=resp  A4=pzt  A5=eda  A6=emg
 """
 
+import math
 import platform
 import sys
 import csv
@@ -33,13 +30,11 @@ import plux
 # ── Configuration ──────────────────────────────────────────────────────
 DEVICE_ADDRESS  = "98:D3:91:FD:69:DD"
 FREQUENCY       = 100    # Hz
-CALIBRATION_SEC = 30     # secondes de repos pour mesurer les baselines
+CALIBRATION_SEC = 60     # secondes de repos pour mesurer les baselines
 
 # ← Modifier ici selon les capteurs branchés (même ordre port / nom)
 ACTIVE_PORTS  = [1]
-CHANNEL_NAMES = ["pzt"]
-
-# Ports disponibles : A1=acc_x  A2=acc_z  A3=resp  A4=pzt  A5=eda  A6=emg
+CHANNEL_NAMES = ["resp"]
 
 WINDOW_SAMPLES = FREQUENCY * 5
 PLOT_INTERVAL  = 0.2
@@ -47,25 +42,40 @@ PLOT_INTERVAL  = 0.2
 
 
 class PeakTracker:
-    """Détecte les pics dans un signal glissant et calcule taux (bpm) et force."""
+    """Détecte les pics dans un signal glissant.
+    Pour PZT : calcule heart_rate et heart_rate_variability.
+    Pour RESP : calcule breath_rate, breath_amp_min, breath_amp_max.
+    """
 
-    def __init__(self, freq, refractory_sec=1.5, min_interval=1.5, max_interval=10.0):
-        self.freq = freq
-        self._buf            = deque(maxlen=freq * 15)
-        self._rising         = False
-        self._peaks_t        = deque(maxlen=10)
-        self._peaks_amp      = deque(maxlen=10)
+    def __init__(self, freq, refractory_sec, min_interval, max_interval):
+        self.freq             = freq
+        self._buf             = deque(maxlen=freq * 15)
+        self._rising          = False
+        self._peaks_t         = deque(maxlen=20)
+        self._peaks_amp       = deque(maxlen=20)
+        self._rr_intervals    = deque(maxlen=20)
         self._last_peak_frame = 0
-        self._frame          = 0
-        self._refractory     = int(freq * refractory_sec)
-        self._min_interval   = min_interval
-        self._max_interval   = max_interval
-        self._cal_amp        = 0.0
-        self.rate            = 0.0   # cycles/minute
-        self.force           = 0.0   # 0–1
+        self._frame           = 0
+        self._refractory      = int(freq * refractory_sec)
+        self._min_interval    = min_interval
+        self._max_interval    = max_interval
+        self._cal_amp         = 0.0
+
+        # Métriques publiques
+        self.rate    = 0.0
+        self.amp_min = 0.0
+        self.amp_max = 0.0
 
     def set_cal_amp(self, amp):
         self._cal_amp = amp
+
+    @property
+    def hrv_ms(self) -> float:
+        rr = list(self._rr_intervals)
+        if len(rr) < 2:
+            return 0.0
+        diffs = [rr[i+1] - rr[i] for i in range(len(rr)-1)]
+        return math.sqrt(sum(d*d for d in diffs) / len(diffs)) * 1000
 
     def update(self, raw):
         self._frame += 1
@@ -94,62 +104,94 @@ class PeakTracker:
                 if self._min_interval < interval < self._max_interval:
                     self._peaks_t.append(t)
                     self._peaks_amp.append(amp)
-                    intervals  = [self._peaks_t[i+1] - self._peaks_t[i]
-                                  for i in range(len(self._peaks_t)-1)]
-                    self.rate  = 60.0 / (sum(intervals) / len(intervals))
-                    if self._cal_amp > 0:
-                        self.force = min(1.0, amp / self._cal_amp)
+                    self._rr_intervals.append(interval)
+                    intervals = [self._peaks_t[i+1] - self._peaks_t[i]
+                                 for i in range(len(self._peaks_t)-1)]
+                    self.rate = 60.0 / (sum(intervals) / len(intervals))
+                    # amp min/max
+                    self.amp_max = max(self.amp_max, amp)
+                    self.amp_min = amp if self.amp_min == 0.0 \
+                                   else min(self.amp_min, amp)
             else:
                 self._peaks_t.append(t)
                 self._peaks_amp.append(amp)
 
 
-# Paramètres de détection de pics selon le type de signal
 _TRACKER_PARAMS = {
-    "pzt": {"refractory_sec": 0.35, "min_interval": 0.4,  "max_interval": 1.5},   # pouls ~40-150 bpm
-    "resp":{"refractory_sec": 2.0,  "min_interval": 2.0,  "max_interval": 10.0},  # respiration ~6-30 bpm
+    "pzt":  {"refractory_sec": 0.35, "min_interval": 0.4,  "max_interval": 1.5},
+    "resp": {"refractory_sec": 2.0,  "min_interval": 2.0,  "max_interval": 10.0},
 }
-_TRACKER_DEFAULT = {"refractory_sec": 1.5,  "min_interval": 1.5,  "max_interval": 10.0}
-
-def _tracker_params(channel_name: str) -> dict:
-    return _TRACKER_PARAMS.get(channel_name, _TRACKER_DEFAULT)
 
 
 class SimpleProcessor:
-    """Calibration + analyse temps réel pour n'importe quelle liste de canaux."""
+    """Calibration + métriques temps réel par capteur. Pas de calcul de stress."""
 
     def __init__(self, channel_names, frequency, calibration_sec):
-        self.channels     = channel_names
-        self.freq         = frequency
-        self._cal_sec     = calibration_sec
-        self._cal_target  = frequency * calibration_sec
-        self._cal_count   = 0
-        self._cal_data    = {ch: [] for ch in channel_names}
-        self._baselines   = {}
-        self._trackers    = {ch: PeakTracker(frequency, **_tracker_params(ch))
-                             for ch in channel_names}
-        self.calibrated   = False
+        self.channels    = channel_names
+        self.freq        = frequency
+        self._cal_sec    = calibration_sec
+        self._cal_target = frequency * calibration_sec
+        self._cal_count  = 0
+        self._cal_data   = {ch: [] for ch in channel_names}
+        self._baselines  = {}
+        self.calibrated  = False
 
+        # Trackers pics (PZT et RESP)
+        self._trackers = {
+            ch: PeakTracker(frequency, **_TRACKER_PARAMS[ch])
+            for ch in channel_names if ch in _TRACKER_PARAMS
+        }
+
+        # Buffer EDA
+        self._eda_buf = deque(maxlen=frequency * 10) if "eda" in channel_names else None
+
+        # EMG : baseline et état
+        self._emg_buf         = deque(maxlen=int(frequency * 0.2)) if "emg" in channel_names else None
+        self._emg_baseline    = 1.0
+        self._emg_contracting = False
+        self._emg_peak_rms    = 0.0
+
+    # ── Mise à jour trame par trame ──────────────────────────────────────
     def update(self, frame: dict) -> dict | None:
         self._cal_count += 1
-
         if not self.calibrated:
             return self._calibrate(frame)
 
         out = {"type": "data"}
-        for ch in self.channels:
-            raw     = frame[ch]
-            tracker = self._trackers[ch]
-            tracker.update(raw)
-            out[ch]               = raw
-            out[f"{ch}_rate"]     = round(tracker.rate,  1)
-            out[f"{ch}_force"]    = round(tracker.force, 3)
+
+        if "pzt" in self.channels:
+            self._trackers["pzt"].update(frame["pzt"])
+            out["heart_rate"]             = round(self._trackers["pzt"].rate, 1)
+            out["heart_rate_variability"] = round(self._trackers["pzt"].hrv_ms, 1)
+
+        if "resp" in self.channels:
+            self._trackers["resp"].update(frame["resp"])
+            out["breath_rate"]    = round(self._trackers["resp"].rate, 1)
+            out["breath_amp_min"] = round(self._trackers["resp"].amp_min, 1)
+            out["breath_amp_max"] = round(self._trackers["resp"].amp_max, 1)
+
+        if "eda" in self.channels:
+            self._eda_buf.append(frame["eda"])
+            out["eda_level"] = round(sum(self._eda_buf) / len(self._eda_buf), 1)
+
+        if "acc_x" in self.channels and "acc_z" in self.channels:
+            dx = frame["acc_x"] - self._baselines.get("acc_x", 512.0)
+            dz = frame["acc_z"] - self._baselines.get("acc_z", 512.0)
+            out["aim_angle"] = round(math.degrees(math.atan2(dx, dz)), 1)
+
+        if "emg" in self.channels:
+            triggered, power = self._process_emg(frame["emg"])
+            out["shot_triggered"] = triggered
+            out["shot_power"]     = round(power, 3)
+
         return out
 
+    # ── Calibration ──────────────────────────────────────────────────────
     def _calibrate(self, frame) -> dict | None:
         for ch in self.channels:
             self._cal_data[ch].append(frame[ch])
-            self._trackers[ch].update(frame[ch])
+        for ch, tracker in self._trackers.items():
+            tracker.update(frame[ch])
 
         if self._cal_count % self.freq != 0:
             return None
@@ -158,32 +200,39 @@ class SimpleProcessor:
         progress = self._cal_count / self._cal_target
 
         if self._cal_count >= self._cal_target:
-            self._baselines = {}
+            # Baselines neutres pour ACC
+            for ch in ("acc_x", "acc_z"):
+                if ch in self.channels:
+                    vals = self._cal_data[ch]
+                    self._baselines[ch] = sum(vals) / len(vals)
+
+            # Baseline EMG
+            if "emg" in self.channels:
+                vals = self._cal_data["emg"]
+                sq   = sum(v*v for v in vals)
+                self._emg_baseline = math.sqrt(sq / len(vals)) or 1.0
+
+            # Amplitude de référence pour les trackers
+            for ch, tracker in self._trackers.items():
+                vals = sorted(self._cal_data[ch])
+                n    = len(vals)
+                amp  = vals[int(n * 0.9)] - vals[int(n * 0.1)]
+                tracker.set_cal_amp(amp)
+
+            self.calibrated = True
+
+            baselines_out = {}
             for ch in self.channels:
                 vals = sorted(self._cal_data[ch])
                 n    = len(vals)
-                mean = sum(vals) / n
-                amp  = vals[int(n * 0.9)] - vals[int(n * 0.1)]
-                rate = self._trackers[ch].rate
-                self._baselines[ch] = {"mean": mean, "amp": amp, "rate": rate}
-                self._trackers[ch].set_cal_amp(amp)
+                baselines_out[ch] = {
+                    "mean": round(sum(self._cal_data[ch]) / n, 1),
+                    "amp":  round(vals[int(n * 0.9)] - vals[int(n * 0.1)], 1),
+                    "rate": round(self._trackers[ch].rate, 1) if ch in self._trackers else 0.0,
+                }
+                print(f"[Calibration OK] {ch}: {baselines_out[ch]}")
 
-            self.calibrated = True
-            for ch, b in self._baselines.items():
-                print(f"[Calibration OK] {ch}: "
-                      f"mean={b['mean']:.0f}  amp={b['amp']:.0f}  rate={b['rate']:.1f}cyc/min")
-
-            return {
-                "type":      "calibration_complete",
-                "baselines": {
-                    ch: {
-                        "mean": round(b["mean"], 1),
-                        "amp":  round(b["amp"],  1),
-                        "rate": round(b["rate"],  1),
-                    }
-                    for ch, b in self._baselines.items()
-                },
-            }
+            return {"type": "calibration_complete", "baselines": baselines_out}
 
         print(f"[Calibration] {elapsed}s / {self._cal_sec}s  ({int(progress * 100)}%)")
         return {
@@ -193,6 +242,26 @@ class SimpleProcessor:
             "total_sec":   self._cal_sec,
         }
 
+    # ── EMG → tir ────────────────────────────────────────────────────────
+    def _process_emg(self, raw):
+        self._emg_buf.append(raw)
+        sq  = sum(v*v for v in self._emg_buf)
+        rms = math.sqrt(sq / len(self._emg_buf))
+        threshold = self._emg_baseline * 4.0
+
+        if rms > threshold:
+            self._emg_peak_rms    = max(self._emg_peak_rms, rms)
+            self._emg_contracting = True
+        elif self._emg_contracting:
+            power = min(1.0, (self._emg_peak_rms - threshold) / (self._emg_baseline * 6.0))
+            self._emg_peak_rms    = 0.0
+            self._emg_contracting = False
+            return True, power
+
+        return False, 0.0
+
+
+# ── Classe Acquisition PLUX ─────────────────────────────────────────────
 
 class Acquisition(plux.SignalsDev):
 
@@ -218,14 +287,17 @@ class Acquisition(plux.SignalsDev):
             self.bridge.send(result)
 
         if result.get("type") == "data" and nSeq % (self.frequency * 2) == 0:
-            parts = "  ".join(
-                f"{ch}: {result[f'{ch}_rate']:.1f}cyc/min  force={result[f'{ch}_force']:.2f}"
-                for ch in CHANNEL_NAMES
-            )
-            print(f"[Live] {parts}")
+            parts = []
+            for key, val in result.items():
+                if key == "type":
+                    continue
+                parts.append(f"{key}={val}")
+            print(f"[Live] {'  '.join(parts)}")
 
         return not self.running
 
+
+# ── Point d'entrée ──────────────────────────────────────────────────────
 
 def acquérir_et_afficher():
     bridge = WebSocketBridge()

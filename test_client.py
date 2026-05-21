@@ -34,30 +34,29 @@ async def main():
 
                 elif t == "calibration_complete":
                     print("\n")
-                    print("╔══════════════════════════════════════╗")
-                    print("║         CALIBRATION TERMINÉE         ║")
-                    print("╠══════════════════════════════════════╣")
-                    print(f"║  FC au repos   : {msg['hr_rest']:5.1f} bpm  ({msg['hr_label']:<12})║")
-                    print(f"║  Resp au repos : {msg['resp_rest']:5.1f} bpm  ({msg['resp_label']:<12})║")
-                    print(f"║  EDA baseline  : {msg['eda_baseline']:5.1f}              ║")
-                    print("╠══════════════════════════════════════╣")
-                    print("║         ► Prêt à jouer ◄             ║")
-                    print("╚══════════════════════════════════════╝")
+                    print("╔════════════════════════════════════════════╗")
+                    print("║           CALIBRATION TERMINÉE             ║")
+                    print("╠════════════════════════════════════════════╣")
+                    print(f"║  FC au repos   : {msg['hr_rest']:5.1f} bpm  ({msg['hr_label']:<14})║")
+                    print(f"║  HRV au repos  : {msg.get('hrv_rest', 0.0):5.1f} ms                  ║")
+                    print(f"║  Resp au repos : {msg['resp_rest']:5.1f} bpm  ({msg['resp_label']:<14})║")
+                    print(f"║  EDA baseline  : {msg['eda_baseline']:5.1f}                       ║")
+                    print("╠════════════════════════════════════════════╣")
+                    print("║           ► Prêt à jouer ◄                 ║")
+                    print("╚════════════════════════════════════════════╝")
                     print()
 
                 elif t == "data":
                     if msg["shot_triggered"]:
-                        power_bar = _bar(msg["shot_power"])
-                        print(f"\n  ★ TIR !  puissance=[{power_bar}] {msg['shot_power']:.2f}"
-                              f"  angle={msg['aim_angle']:+.1f}°"
-                              f"  stress={msg['stress']:.2f}")
+                        print(f"\n  ★ TIR !  stress={msg['stress']:.2f}")
                     else:
                         stress_bar = _bar(msg["stress"])
                         print(
                             f"\r  stress=[{stress_bar}] {msg['stress']:.2f}"
                             f"  FC={msg['heart_rate']:5.1f}bpm"
+                            f"  HRV={msg.get('heart_rate_variability', 0.0):5.1f}ms"
                             f"  resp={msg['breath_rate']:4.1f}bpm"
-                            f"  angle={msg['aim_angle']:+6.1f}°  ",
+                            f"  EDA={msg.get('eda_level', 0.0):6.1f}  ",
                             end="", flush=True,
                         )
 

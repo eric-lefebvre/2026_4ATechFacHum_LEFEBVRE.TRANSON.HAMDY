@@ -14,8 +14,8 @@ import plux
 # ── Configuration ──────────────────────────────────────────────────────
 DEVICE_ADDRESS = "98:D3:91:FD:69:DD"
 FREQUENCY      = 100   # Hz
-ACTIVE_PORTS   = [1, 2, 3, 4, 5, 6]
-CHANNEL_NAMES  = ["acc_x", "acc_z", "resp", "pzt", "eda", "emg"]
+ACTIVE_PORTS   = [1, 2, 3, 4]
+CHANNEL_NAMES  = ["resp", "pzt", "eda", "emg"]
 WINDOW_SAMPLES = FREQUENCY * 5   # fenêtre glissante : 5 dernières secondes
 PLOT_INTERVAL  = 0.2              # rafraîchissement du graphique (secondes)
 # ───────────────────────────────────────────────────────────────────────
@@ -58,14 +58,13 @@ class Acquisition(plux.SignalsDev):
 
         elif msg_type == "data":
             if result["shot_triggered"]:
-                print(f"[TIR] puissance={result['shot_power']:.2f}  "
-                      f"angle={result['aim_angle']:.1f}°  "
-                      f"stress={result['stress']:.2f}")
+                print(f"[TIR] stress={result['stress']:.2f}")
             elif nSeq % (self.frequency * 2) == 0:
                 print(f"[Live] stress={result['stress']:.2f}  "
                       f"FC={result['heart_rate']:.0f}bpm  "
                       f"resp={result['breath_rate']:.1f}bpm  "
-                      f"angle={result['aim_angle']:.1f}°")
+                      f"HRV={result['heart_rate_variability']:.0f}ms  "
+                      f"EDA={result['eda_level']:.0f}")
 
         if nSeq % (self.frequency * 10) == 0 and nSeq > 0:
             total = nSeq + 1
