@@ -12,9 +12,10 @@ sys.path.append(f"Win{platform.architecture()[0][:2]}_{''.join(platform.python_v
 import plux
 
 # ── Configuration ──────────────────────────────────────────────────────
-DEVICE_ADDRESS = "98:D3:91:FD:69:DD"
-FREQUENCY      = 100   # Hz
-ACTIVE_PORTS   = [1, 2, 3, 4]
+DEVICE_ADDRESS  = "98:D3:91:FD:69:DD"
+FREQUENCY       = 100   # Hz
+CALIBRATION_SEC = 60    # secondes de repos pour mesurer les baselines
+ACTIVE_PORTS    = [1, 2, 3, 4]
 CHANNEL_NAMES  = ["resp", "pzt", "eda", "emg"]
 WINDOW_SAMPLES = FREQUENCY * 5   # fenêtre glissante : 5 dernières secondes
 PLOT_INTERVAL  = 0.2              # rafraîchissement du graphique (secondes)
@@ -28,7 +29,7 @@ class Acquisition(plux.SignalsDev):
         plux.SignalsDev.__init__(address)
         self.frequency = FREQUENCY
         self.data      = [[] for _ in ACTIVE_PORTS]
-        self.processor = SignalProcessor(frequency=FREQUENCY)
+        self.processor = SignalProcessor(frequency=FREQUENCY, calibration_sec=CALIBRATION_SEC)
         self.bridge    = bridge
         self.running   = True
 

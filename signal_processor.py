@@ -43,6 +43,9 @@ FREQUENCY          = 100   # Hz
 CALIBRATION_SEC    = 60    # secondes de repos pour établir les baselines
 
 
+EMG_RELEASE_FRAMES    = 50   # frames sous le seuil pour déclencher le tir (0.5s)
+EMG_REFRACTORY_FRAMES = 100  # frames d'insensibilité après un tir (1s)
+
 EDA_WINDOW_SEC     = 10
 PZT_WINDOW_SEC     = 5
 RESP_WINDOW_SEC    = 15
@@ -51,11 +54,12 @@ RESP_WINDOW_SEC    = 15
 
 class SignalProcessor:
 
-    def __init__(self, frequency=FREQUENCY):
+    def __init__(self, frequency=FREQUENCY, calibration_sec=CALIBRATION_SEC):
         self.freq = frequency
         self.calibrated = False
+        self._cal_sec    = calibration_sec
         self._cal_count  = 0
-        self._cal_target = frequency * CALIBRATION_SEC
+        self._cal_target = frequency * calibration_sec
 
         # Buffers de calibration repos
         self._cal_emg  = []
@@ -77,8 +81,10 @@ class SignalProcessor:
         self._cal_hr_samples = []
 
         # ── EMG ─────────────────────────────────────────────────────────
-        self._emg_threshold   = 0.0   # calculé à la fin de la calibration
-        self._emg_contracting = False
+        self._emg_threshold     = 0.0   # calculé à la fin de la calibration
+        self._emg_contracting   = False
+        self._emg_below_frames  = 0
+        self._emg_refractory    = 0
 
         # ── EDA ─────────────────────────────────────────────────────────
         self._eda_buf = deque(maxlen=frequency * EDA_WINDOW_SEC)
@@ -151,8 +157,8 @@ class SignalProcessor:
 
         if self._cal_count >= self._cal_target:
             emg_mean = _mean(self._cal_emg)
-            emg_max  = max(self._cal_emg)
-            self._emg_threshold      = emg_mean + 2 * (emg_max - emg_mean)
+            emg_std  = math.sqrt(sum((v - emg_mean)**2 for v in self._cal_emg) / len(self._cal_emg))
+            self._emg_threshold      = emg_mean + 8 * emg_std
             self._eda_baseline       = _mean(self._cal_eda) or 1.0
             self._eda_baseline_range = _range90(self._cal_eda) or 1.0
             # self._acc_x_neutral = _mean(self._cal_accx)   # ACC désactivé
@@ -190,11 +196,19 @@ class SignalProcessor:
 
     # ── EMG → tir ───────────────────────────────────────────────────────
     def _process_emg(self, raw) -> bool:
+        if self._emg_refractory > 0:
+            self._emg_refractory -= 1
+            return False
         if raw > self._emg_threshold:
-            self._emg_contracting = True
+            self._emg_contracting  = True
+            self._emg_below_frames = 0
         elif self._emg_contracting:
-            self._emg_contracting = False
-            return True
+            self._emg_below_frames += 1
+            if self._emg_below_frames >= EMG_RELEASE_FRAMES:
+                self._emg_contracting  = False
+                self._emg_below_frames = 0
+                self._emg_refractory   = EMG_REFRACTORY_FRAMES
+                return True
         return False
 
     # ── ACC → angle de visée (désactivé) ────────────────────────────────

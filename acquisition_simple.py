@@ -30,11 +30,11 @@ import plux
 # ── Configuration ──────────────────────────────────────────────────────
 DEVICE_ADDRESS  = "98:D3:91:FD:69:DD"
 FREQUENCY       = 100    # Hz
-CALIBRATION_SEC = 60     # secondes de repos pour mesurer les baselines
+CALIBRATION_SEC = 30     # secondes de repos pour mesurer les baselines
 
 # ← Modifier ici selon les capteurs branchés (même ordre port / nom)
 ACTIVE_PORTS  = [1]
-CHANNEL_NAMES = ["resp"]
+CHANNEL_NAMES = ["emg"]
 
 WINDOW_SAMPLES = FREQUENCY * 5
 PLOT_INTERVAL  = 0.2
@@ -145,11 +145,11 @@ class SimpleProcessor:
         # Buffer EDA
         self._eda_buf = deque(maxlen=frequency * 10) if "eda" in channel_names else None
 
-        # EMG : baseline et état
-        self._emg_buf         = deque(maxlen=int(frequency * 0.2)) if "emg" in channel_names else None
-        self._emg_baseline    = 1.0
-        self._emg_contracting = False
-        self._emg_peak_rms    = 0.0
+        # EMG : seuil et état
+        self._emg_threshold    = 0.0   # calculé à la fin de la calibration
+        self._emg_contracting  = False
+        self._emg_below_frames = 0
+        self._emg_refractory   = 0
 
     # ── Mise à jour trame par trame ──────────────────────────────────────
     def update(self, frame: dict) -> dict | None:
@@ -180,9 +180,7 @@ class SimpleProcessor:
             out["aim_angle"] = round(math.degrees(math.atan2(dx, dz)), 1)
 
         if "emg" in self.channels:
-            triggered, power = self._process_emg(frame["emg"])
-            out["shot_triggered"] = triggered
-            out["shot_power"]     = round(power, 3)
+            out["shot_triggered"] = self._process_emg(frame["emg"])
 
         return out
 
@@ -206,11 +204,13 @@ class SimpleProcessor:
                     vals = self._cal_data[ch]
                     self._baselines[ch] = sum(vals) / len(vals)
 
-            # Baseline EMG
+            # Seuil EMG : mean + 8 * std
             if "emg" in self.channels:
                 vals = self._cal_data["emg"]
-                sq   = sum(v*v for v in vals)
-                self._emg_baseline = math.sqrt(sq / len(vals)) or 1.0
+                emg_mean = sum(vals) / len(vals)
+                emg_std  = math.sqrt(sum((v - emg_mean)**2 for v in vals) / len(vals))
+                self._emg_threshold = emg_mean + 8 * emg_std
+                print(f"[Calibration OK] emg: seuil={self._emg_threshold:.0f} (moy={emg_mean:.0f}, std={emg_std:.1f})")
 
             # Amplitude de référence pour les trackers
             for ch, tracker in self._trackers.items():
@@ -243,22 +243,21 @@ class SimpleProcessor:
         }
 
     # ── EMG → tir ────────────────────────────────────────────────────────
-    def _process_emg(self, raw):
-        self._emg_buf.append(raw)
-        sq  = sum(v*v for v in self._emg_buf)
-        rms = math.sqrt(sq / len(self._emg_buf))
-        threshold = self._emg_baseline * 4.0
-
-        if rms > threshold:
-            self._emg_peak_rms    = max(self._emg_peak_rms, rms)
-            self._emg_contracting = True
+    def _process_emg(self, raw) -> bool:
+        if self._emg_refractory > 0:
+            self._emg_refractory -= 1
+            return False
+        if raw > self._emg_threshold:
+            self._emg_contracting  = True
+            self._emg_below_frames = 0
         elif self._emg_contracting:
-            power = min(1.0, (self._emg_peak_rms - threshold) / (self._emg_baseline * 6.0))
-            self._emg_peak_rms    = 0.0
-            self._emg_contracting = False
-            return True, power
-
-        return False, 0.0
+            self._emg_below_frames += 1
+            if self._emg_below_frames >= 50:   # 0.5s à 100Hz
+                self._emg_contracting  = False
+                self._emg_below_frames = 0
+                self._emg_refractory   = 100   # 1s à 100Hz
+                return True
+        return False
 
 
 # ── Classe Acquisition PLUX ─────────────────────────────────────────────
@@ -286,13 +285,16 @@ class Acquisition(plux.SignalsDev):
         if self.bridge:
             self.bridge.send(result)
 
-        if result.get("type") == "data" and nSeq % (self.frequency * 2) == 0:
-            parts = []
-            for key, val in result.items():
-                if key == "type":
-                    continue
-                parts.append(f"{key}={val}")
-            print(f"[Live] {'  '.join(parts)}")
+        if result.get("type") == "data":
+            if result.get("shot_triggered"):
+                print(f"[TIR]")
+            elif nSeq % (self.frequency * 2) == 0:
+                parts = []
+                for key, val in result.items():
+                    if key in ("type", "shot_triggered"):
+                        continue
+                    parts.append(f"{key}={val}")
+                print(f"[Live] {'  '.join(parts)}")
 
         return not self.running
 
