@@ -90,12 +90,12 @@ class SignalProcessor:
         self._eda_buf = deque(maxlen=frequency * EDA_WINDOW_SEC)
 
         # ── PZT (pouls + HRV) ───────────────────────────────────────────
-        self._pzt_buf             = deque(maxlen=frequency * PZT_WINDOW_SEC)
-        self._pzt_rising          = False
-        self._pzt_peaks           = deque(maxlen=20)
-        self._pzt_last_peak_frame = 0
-        self._heart_rate_bpm      = 70.0
-        self._rr_intervals        = deque(maxlen=20)
+        self._pzt_buf                  = deque(maxlen=frequency * PZT_WINDOW_SEC)
+        self._pzt_rising               = False
+        self._pzt_peaks                = deque(maxlen=20)
+        self._pzt_last_peak_frame      = 0
+        self._heart_rate_bpm           = 70.0
+        self._rr_intervals             = deque(maxlen=20)
 
         # ── RESP ─────────────────────────────────────────────────────────
         self._resp_buf             = deque(maxlen=frequency * RESP_WINDOW_SEC)
@@ -158,7 +158,7 @@ class SignalProcessor:
         if self._cal_count >= self._cal_target:
             emg_mean = _mean(self._cal_emg)
             emg_std  = math.sqrt(sum((v - emg_mean)**2 for v in self._cal_emg) / len(self._cal_emg))
-            self._emg_threshold      = emg_mean + 8 * emg_std
+            self._emg_threshold      = emg_mean + 20 * emg_std
             self._eda_baseline       = _mean(self._cal_eda) or 1.0
             self._eda_baseline_range = _range90(self._cal_eda) or 1.0
             # self._acc_x_neutral = _mean(self._cal_accx)   # ACC désactivé
@@ -174,7 +174,7 @@ class SignalProcessor:
                 f"HRV repos={self._hrv_rest*1000:.0f}ms  "
                 f"Resp repos={self._resp_rest:.1f}bpm ({_resp_label(self._resp_rest)})  "
                 f"EDA range={self._eda_baseline_range:.1f}  "
-                f"EMG seuil tir={self._emg_threshold:.0f} (moy={emg_mean:.0f}, max={emg_max:.0f})"
+                f"EMG seuil tir={self._emg_threshold:.0f} (moy={emg_mean:.0f}, std={emg_std:.1f})"
             )
             return {
                 "type":         "calibration_complete",
@@ -186,12 +186,12 @@ class SignalProcessor:
                 "eda_baseline": round(self._eda_baseline_range, 1),
             }
 
-        print(f"[Calibration] {elapsed}s / {CALIBRATION_SEC}s  ({int(progress * 100)}%)")
+        print(f"[Calibration] {elapsed}s / {self._cal_sec}s  ({int(progress * 100)}%)")
         return {
             "type":        "calibration_progress",
             "progress":    round(progress, 2),
             "elapsed_sec": elapsed,
-            "total_sec":   CALIBRATION_SEC,
+            "total_sec":   self._cal_sec,
         }
 
     # ── EMG → tir ───────────────────────────────────────────────────────
@@ -224,10 +224,15 @@ class SignalProcessor:
         if len(self._pzt_buf) < 10:
             return self._heart_rate_bpm
 
-        buf_sorted = sorted(self._pzt_buf)
-        n = len(buf_sorted)
-        median_pzt     = buf_sorted[n // 2]
-        amp_pzt        = buf_sorted[int(n * 0.9)] - buf_sorted[int(n * 0.1)]
+        buf_list   = list(self._pzt_buf)
+        buf_sorted = sorted(buf_list)
+        n          = len(buf_sorted)
+        median_pzt = buf_sorted[n // 2]
+        amp_pzt    = buf_sorted[int(n * 0.9)] - buf_sorted[int(n * 0.1)]
+        mean_pzt   = sum(buf_list) / n
+        std_pzt    = math.sqrt(sum((v - mean_pzt) ** 2 for v in buf_list) / n)
+        if std_pzt < 20:
+            return 0.0
         peak_threshold = median_pzt + 0.4 * amp_pzt
 
         if raw > peak_threshold and not self._pzt_rising:
@@ -245,6 +250,7 @@ class SignalProcessor:
                 if 0.4 < interval < 1.5:
                     self._pzt_peaks.append(t)
                     self._rr_intervals.append(interval)
+                    self._pzt_last_valid_rr_frame = self._frame_count
                     if len(self._pzt_peaks) >= 2:
                         intervals = [self._pzt_peaks[i+1] - self._pzt_peaks[i]
                                      for i in range(len(self._pzt_peaks)-1)]

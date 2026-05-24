@@ -14,9 +14,9 @@ import plux
 # ── Configuration ──────────────────────────────────────────────────────
 DEVICE_ADDRESS  = "98:D3:91:FD:69:DD"
 FREQUENCY       = 100   # Hz
-CALIBRATION_SEC = 60    # secondes de repos pour mesurer les baselines
+CALIBRATION_SEC = 30    # secondes de repos pour mesurer les baselines
 ACTIVE_PORTS    = [1, 2, 3, 4]
-CHANNEL_NAMES  = ["resp", "pzt", "eda", "emg"]
+CHANNEL_NAMES  = ["resp", "emg", "eda", "pzt"]
 WINDOW_SAMPLES = FREQUENCY * 5   # fenêtre glissante : 5 dernières secondes
 PLOT_INTERVAL  = 0.2              # rafraîchissement du graphique (secondes)
 # ───────────────────────────────────────────────────────────────────────
