@@ -50,6 +50,8 @@ EMG_REFRACTORY_FRAMES = 100  # frames d'insensibilité après un tir (1s)
 EDA_WINDOW_SEC     = 10
 PPG_WINDOW_SEC     = 5
 RESP_WINDOW_SEC    = 15
+ACC_WINDOW_FRAMES  = 50   # 0.5s à 100Hz
+ACC_MOVEMENT_MAX   = 1.7  # score normalisé → 1.0
 
 # ── Classe principale ───────────────────────────────────────────────────
 
@@ -71,8 +73,9 @@ class SignalProcessor:
         # Baselines repos
         self._eda_baseline       = 1.0
         self._eda_baseline_range = 1.0
-        # self._acc_x_neutral = 512.0   # ACC désactivé
-        # self._acc_z_neutral = 512.0
+        # ── ACC (mouvement) ──────────────────────────────────────────────
+        self._acc_buf_x = deque(maxlen=ACC_WINDOW_FRAMES)
+        self._acc_buf_z = deque(maxlen=ACC_WINDOW_FRAMES)
 
         # Baselines FC / HRV / resp
         self._hr_rest   = 70.0
@@ -118,7 +121,7 @@ class SignalProcessor:
             return self._run_calibration(frame)
 
         shot_start, shot_end = self._process_emg(frame["emg"])
-        # aim_angle    = self._process_acc(frame["acc_x"], frame["acc_z"])  # ACC désactivé
+        movement       = self._process_acc(frame["acc_x"], frame["acc_z"])
         heart_rate     = self._process_ppg(frame["ppg"])
         breath_rate    = self._process_resp(frame["resp"])
         stress         = self._process_stress(frame["eda"], heart_rate, breath_rate)
@@ -128,6 +131,7 @@ class SignalProcessor:
             "type":       "data",
             "shot_start": shot_start,
             "shot_end":   shot_end,
+            "movement":   round(movement, 3),
             # "shot_power":           supprimé — recalibrer d'abord
             # "aim_angle":            supprimé — ACC désactivé
             "stress":                 round(stress, 3),
@@ -222,11 +226,21 @@ class SignalProcessor:
 
         return shot_start, shot_end
 
-    # ── ACC → angle de visée (désactivé) ────────────────────────────────
-    # def _process_acc(self, raw_x, raw_z):
-    #     dx = raw_x - self._acc_x_neutral
-    #     dz = raw_z - self._acc_z_neutral
-    #     return math.degrees(math.atan2(dx, dz))
+    # ── ACC → intensité de mouvement ────────────────────────────────────
+    def _process_acc(self, raw_x, raw_z) -> float:
+        self._acc_buf_x.append(raw_x)
+        self._acc_buf_z.append(raw_z)
+        if len(self._acc_buf_x) < 2:
+            return 0.0
+        buf_x = list(self._acc_buf_x)
+        buf_z = list(self._acc_buf_z)
+        n  = len(buf_x)
+        mx = sum(buf_x) / n
+        mz = sum(buf_z) / n
+        std_x = math.sqrt(sum((v - mx) ** 2 for v in buf_x) / n)
+        std_z = math.sqrt(sum((v - mz) ** 2 for v in buf_z) / n)
+        score = math.sqrt(std_x ** 2 + std_z ** 2)
+        return min(1.0, score / ACC_MOVEMENT_MAX)
 
     # ── PPG → fréquence cardiaque + HRV ─────────────────────────────────
     def _process_ppg(self, raw):
