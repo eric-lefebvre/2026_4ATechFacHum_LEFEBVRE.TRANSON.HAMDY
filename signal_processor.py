@@ -47,9 +47,14 @@ CALIBRATION_SEC    = 60    # secondes de repos pour établir les baselines
 EMG_RELEASE_FRAMES    = 20   # frames sous le seuil de relâchement pour déclencher le tir (0.2s)
 EMG_REFRACTORY_FRAMES = 100  # frames d'insensibilité après un tir (1s)
 
-EDA_WINDOW_SEC     = 10
+EDA_SLOW_SEC          = 60   # buffer pour supprimer le drift d'électrode
+EDA_CHECK_SEC         = 5    # buffer pour détecter si branché
+EDA_SCR_REFERENCE     = 50   # amplitude phasique (ADC) = stress maximal
+EDA_NOT_CONNECTED_STD = 5    # std < seuil → capteur non branché
 PPG_WINDOW_SEC     = 5
-RESP_WINDOW_SEC    = 15
+RESP_WINDOW_SEC    = 8
+ACC_WINDOW_FRAMES  = 50   # 0.5s à 100Hz
+ACC_MOVEMENT_MAX   = 1.7  # score normalisé → 1.0
 
 # ── Classe principale ───────────────────────────────────────────────────
 
@@ -71,8 +76,9 @@ class SignalProcessor:
         # Baselines repos
         self._eda_baseline       = 1.0
         self._eda_baseline_range = 1.0
-        # self._acc_x_neutral = 512.0   # ACC désactivé
-        # self._acc_z_neutral = 512.0
+        # ── ACC (mouvement) ──────────────────────────────────────────────
+        self._acc_buf_x = deque(maxlen=ACC_WINDOW_FRAMES)
+        self._acc_buf_z = deque(maxlen=ACC_WINDOW_FRAMES)
 
         # Baselines FC / HRV / resp
         self._hr_rest   = 70.0
@@ -89,7 +95,10 @@ class SignalProcessor:
         self._emg_refractory        = 0
 
         # ── EDA ─────────────────────────────────────────────────────────
-        self._eda_buf = deque(maxlen=frequency * EDA_WINDOW_SEC)
+        self._eda_short_buf  = deque(maxlen=frequency * EDA_CHECK_SEC)
+        self._eda_slow_buf   = deque(maxlen=frequency * EDA_SLOW_SEC)
+        self._eda_phasic_buf = deque(maxlen=frequency * EDA_CHECK_SEC)
+        self._eda_scr_amp    = 0.0
 
         # ── PPG (pouls + HRV) ───────────────────────────────────────────
         self._ppg_buf                  = deque(maxlen=frequency * PPG_WINDOW_SEC)
@@ -118,7 +127,7 @@ class SignalProcessor:
             return self._run_calibration(frame)
 
         shot_start, shot_end = self._process_emg(frame["emg"])
-        # aim_angle    = self._process_acc(frame["acc_x"], frame["acc_z"])  # ACC désactivé
+        movement       = self._process_acc(frame["acc_x"], frame["acc_z"])
         heart_rate     = self._process_ppg(frame["ppg"])
         breath_rate    = self._process_resp(frame["resp"])
         stress         = self._process_stress(frame["eda"], heart_rate, breath_rate)
@@ -128,6 +137,7 @@ class SignalProcessor:
             "type":       "data",
             "shot_start": shot_start,
             "shot_end":   shot_end,
+            "movement":   round(movement, 3),
             # "shot_power":           supprimé — recalibrer d'abord
             # "aim_angle":            supprimé — ACC désactivé
             "stress":                 round(stress, 3),
@@ -136,7 +146,8 @@ class SignalProcessor:
             "breath_rate":            round(breath_rate, 1),
             "breath_amp_min":         round(self._resp_amp_min, 1),
             "breath_amp_max":         round(self._resp_amp_max, 1),
-            "eda_level":              round(_mean(self._eda_buf), 1),
+            "eda_level":              round(_mean(self._eda_short_buf), 1),
+            "eda_scr_amp":            round(self._eda_scr_amp, 1),
         }
 
     # ── Calibration repos ───────────────────────────────────────────────
@@ -162,9 +173,11 @@ class SignalProcessor:
             emg_mean = _mean(self._cal_emg)
             emg_std  = math.sqrt(sum((v - emg_mean)**2 for v in self._cal_emg) / len(self._cal_emg))
             self._emg_threshold         = emg_mean + 20 * emg_std
-            self._emg_release_threshold = emg_mean + 0.25 * 20 * emg_std
+            self._emg_release_threshold = emg_mean + 0.5 * 20 * emg_std
             self._eda_baseline       = _mean(self._cal_eda) or 1.0
             self._eda_baseline_range = _range90(self._cal_eda) or 1.0
+            for v in self._cal_eda:
+                self._eda_slow_buf.append(v)
             # self._acc_x_neutral = _mean(self._cal_accx)   # ACC désactivé
             # self._acc_z_neutral = _mean(self._cal_accz)
             self._hr_rest   = _mean(self._cal_hr_samples) or 70.0
@@ -222,11 +235,21 @@ class SignalProcessor:
 
         return shot_start, shot_end
 
-    # ── ACC → angle de visée (désactivé) ────────────────────────────────
-    # def _process_acc(self, raw_x, raw_z):
-    #     dx = raw_x - self._acc_x_neutral
-    #     dz = raw_z - self._acc_z_neutral
-    #     return math.degrees(math.atan2(dx, dz))
+    # ── ACC → intensité de mouvement ────────────────────────────────────
+    def _process_acc(self, raw_x, raw_z) -> float:
+        self._acc_buf_x.append(raw_x)
+        self._acc_buf_z.append(raw_z)
+        if len(self._acc_buf_x) < 2:
+            return 0.0
+        buf_x = list(self._acc_buf_x)
+        buf_z = list(self._acc_buf_z)
+        n  = len(buf_x)
+        mx = sum(buf_x) / n
+        mz = sum(buf_z) / n
+        std_x = math.sqrt(sum((v - mx) ** 2 for v in buf_x) / n)
+        std_z = math.sqrt(sum((v - mz) ** 2 for v in buf_z) / n)
+        score = math.sqrt(std_x ** 2 + std_z ** 2)
+        return min(1.0, score / ACC_MOVEMENT_MAX)
 
     # ── PPG → fréquence cardiaque + HRV ─────────────────────────────────
     def _process_ppg(self, raw):
@@ -261,7 +284,6 @@ class SignalProcessor:
                 if 0.4 < interval < 1.5:
                     self._ppg_peaks.append(t)
                     self._rr_intervals.append(interval)
-                    self._ppg_last_valid_rr_frame = self._frame_count
                     if len(self._ppg_peaks) >= 2:
                         intervals = [self._ppg_peaks[i+1] - self._ppg_peaks[i]
                                      for i in range(len(self._ppg_peaks)-1)]
@@ -278,18 +300,22 @@ class SignalProcessor:
         if len(self._resp_buf) < 20:
             return self._breath_rate
 
-        buf_sorted = sorted(self._resp_buf)
-        n = len(buf_sorted)
-        median_resp = buf_sorted[n // 2]
-        amp_resp    = buf_sorted[int(n * 0.9)] - buf_sorted[int(n * 0.1)]
-        threshold   = median_resp + 0.3 * amp_resp
+        buf_list = list(self._resp_buf)
+        n        = len(buf_list)
+        mean_resp = sum(buf_list) / n
+        std_resp  = math.sqrt(sum((v - mean_resp) ** 2 for v in buf_list) / n)
+        amp_resp  = std_resp
+        threshold = mean_resp + 0.8 * std_resp
+
+        if self._frame_count % 100 == 0:
+            print(f"[RESP debug] raw={raw}  mean={mean_resp:.0f}  std={std_resp:.1f}  thr={threshold:.0f}  rising={self._resp_rising}  rate={self._breath_rate:.1f}")
 
         if raw > threshold and not self._resp_rising:
             self._resp_rising = True
         elif raw < threshold and self._resp_rising:
             self._resp_rising = False
             frames_since_last = self._frame_count - self._resp_last_peak_frame
-            if frames_since_last < self.freq * 2.0:
+            if frames_since_last < self.freq * 1.0:
                 return self._breath_rate
             self._resp_last_peak_frame = self._frame_count
             t = self._frame_count / self.freq
@@ -301,7 +327,7 @@ class SignalProcessor:
 
             if self._resp_peaks:
                 interval = t - self._resp_peaks[-1]
-                if 2.0 < interval < 10.0:
+                if 1.0 < interval < 10.0:
                     self._resp_peaks.append(t)
                     if len(self._resp_peaks) >= 2:
                         intervals = [self._resp_peaks[i+1] - self._resp_peaks[i]
@@ -312,23 +338,42 @@ class SignalProcessor:
 
         return self._breath_rate
 
+    # ── EDA → composante phasique (SCR) ─────────────────────────────────
+    def _process_eda(self, raw) -> float:
+        self._eda_short_buf.append(raw)
+        self._eda_slow_buf.append(raw)
+
+        # Capteur non branché : signal plat
+        if len(self._eda_short_buf) == self._eda_short_buf.maxlen:
+            short_list = list(self._eda_short_buf)
+            mean_s = sum(short_list) / len(short_list)
+            std_s  = math.sqrt(sum((v - mean_s) ** 2 for v in short_list) / len(short_list))
+            if std_s < EDA_NOT_CONNECTED_STD:
+                return 0.0
+
+        slow_mean = sum(self._eda_slow_buf) / len(self._eda_slow_buf)
+        phasic    = raw - slow_mean
+        self._eda_phasic_buf.append(phasic)
+
+        if len(self._eda_phasic_buf) < self.freq * 2:
+            return 0.0
+
+        self._eda_scr_amp = max(0.0, max(self._eda_phasic_buf))
+        return min(1.0, self._eda_scr_amp / EDA_SCR_REFERENCE)
+
     # ── Stress combiné (WESAD-inspired) ─────────────────────────────────
     def _process_stress(self, raw_eda, heart_rate, breath_rate):
-        self._eda_buf.append(raw_eda)
-
-        eda_range  = _range90(self._eda_buf)
-        eda_stress = min(1.0, max(0.0, eda_range / self._eda_baseline_range)) \
-                     if self._eda_baseline_range > 1 else 0.0
+        eda_stress = self._process_eda(raw_eda)
 
         hr_stress = min(1.0, max(0.0,
-            (heart_rate - self._hr_rest) / (self._hr_rest * 0.5)))
+            (heart_rate - self._hr_rest) / (self._hr_rest * 0.25)))
 
         hrv_now    = _rmssd(list(self._rr_intervals))
         hrv_stress = min(1.0, max(0.0,
-            1.0 - hrv_now / self._hrv_rest)) if self._hrv_rest > 0 else 0.0
+            1.0 - hrv_now / (self._hrv_rest * 0.5))) if self._hrv_rest > 0 else 0.0
 
         resp_stress = min(1.0, max(0.0,
-            (breath_rate - self._resp_rest) / (self._resp_rest * 0.5)))
+            (breath_rate - self._resp_rest) / (self._resp_rest * 0.25)))
 
         return (0.35 * hr_stress
               + 0.30 * hrv_stress

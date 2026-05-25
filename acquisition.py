@@ -67,7 +67,8 @@ class Acquisition(plux.SignalsDev):
                       f"FC={result['heart_rate']:.0f}bpm  "
                       f"resp={result['breath_rate']:.1f}bpm  "
                       f"HRV={result['heart_rate_variability']:.0f}ms  "
-                      f"EDA={result['eda_level']:.0f}")
+                      f"EDA={result['eda_level']:.0f}  "
+                      f"mvt={result['movement']:.2f}")
 
         if nSeq % (self.frequency * 10) == 0 and nSeq > 0:
             total = nSeq + 1
