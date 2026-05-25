@@ -44,7 +44,7 @@ FREQUENCY          = 100   # Hz
 CALIBRATION_SEC    = 60    # secondes de repos pour établir les baselines
 
 
-EMG_RELEASE_FRAMES    = 20   # frames sous le seuil pour déclencher le tir (0.2s)
+EMG_RELEASE_FRAMES    = 20   # frames sous le seuil de relâchement pour déclencher le tir (0.2s)
 EMG_REFRACTORY_FRAMES = 100  # frames d'insensibilité après un tir (1s)
 
 EDA_WINDOW_SEC     = 10
@@ -82,10 +82,11 @@ class SignalProcessor:
         self._cal_hr_samples = []
 
         # ── EMG ─────────────────────────────────────────────────────────
-        self._emg_threshold     = 0.0   # calculé à la fin de la calibration
-        self._emg_contracting   = False
-        self._emg_below_frames  = 0
-        self._emg_refractory    = 0
+        self._emg_threshold         = 0.0   # calculé à la fin de la calibration
+        self._emg_release_threshold = 0.0   # mean + moitié de la marge du seuil
+        self._emg_contracting       = False
+        self._emg_below_frames      = 0
+        self._emg_refractory        = 0
 
         # ── EDA ─────────────────────────────────────────────────────────
         self._eda_buf = deque(maxlen=frequency * EDA_WINDOW_SEC)
@@ -160,7 +161,8 @@ class SignalProcessor:
         if self._cal_count >= self._cal_target:
             emg_mean = _mean(self._cal_emg)
             emg_std  = math.sqrt(sum((v - emg_mean)**2 for v in self._cal_emg) / len(self._cal_emg))
-            self._emg_threshold      = emg_mean + 15 * emg_std
+            self._emg_threshold         = emg_mean + 20 * emg_std
+            self._emg_release_threshold = emg_mean + 0.25 * 20 * emg_std
             self._eda_baseline       = _mean(self._cal_eda) or 1.0
             self._eda_baseline_range = _range90(self._cal_eda) or 1.0
             # self._acc_x_neutral = _mean(self._cal_accx)   # ACC désactivé
@@ -210,7 +212,7 @@ class SignalProcessor:
                 shot_start = True
             self._emg_contracting  = True
             self._emg_below_frames = 0
-        elif self._emg_contracting:
+        elif self._emg_contracting and raw < self._emg_release_threshold:
             self._emg_below_frames += 1
             if self._emg_below_frames >= EMG_RELEASE_FRAMES:
                 self._emg_contracting  = False

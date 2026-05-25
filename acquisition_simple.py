@@ -146,10 +146,11 @@ class SimpleProcessor:
         self._eda_buf = deque(maxlen=frequency * 10) if "eda" in channel_names else None
 
         # EMG : seuil et état
-        self._emg_threshold    = 0.0   # calculé à la fin de la calibration
-        self._emg_contracting  = False
-        self._emg_below_frames = 0
-        self._emg_refractory   = 0
+        self._emg_threshold         = 0.0   # calculé à la fin de la calibration
+        self._emg_release_threshold = 0.0
+        self._emg_contracting       = False
+        self._emg_below_frames      = 0
+        self._emg_refractory        = 0
 
     # ── Mise à jour trame par trame ──────────────────────────────────────
     def update(self, frame: dict) -> dict | None:
@@ -211,7 +212,8 @@ class SimpleProcessor:
                 vals = self._cal_data["emg"]
                 emg_mean = sum(vals) / len(vals)
                 emg_std  = math.sqrt(sum((v - emg_mean)**2 for v in vals) / len(vals))
-                self._emg_threshold = emg_mean + 15 * emg_std
+                self._emg_threshold         = emg_mean + 20 * emg_std
+                self._emg_release_threshold = emg_mean + 0.25 * 20 * emg_std
                 print(f"[Calibration OK] emg: seuil={self._emg_threshold:.0f} (moy={emg_mean:.0f}, std={emg_std:.1f})")
 
             # Amplitude de référence pour les trackers
@@ -258,7 +260,7 @@ class SimpleProcessor:
                 shot_start = True
             self._emg_contracting  = True
             self._emg_below_frames = 0
-        elif self._emg_contracting:
+        elif self._emg_contracting and raw < self._emg_release_threshold:
             self._emg_below_frames += 1
             if self._emg_below_frames >= 20:   # 0.2s à 100Hz
                 self._emg_contracting  = False
