@@ -3,14 +3,14 @@ Version test — fonctionne avec n'importe quel sous-ensemble de capteurs.
 Pas de calcul de stress. Chaque capteur produit uniquement ses métriques propres.
 
 Sorties selon les capteurs branchés :
-    pzt   → heart_rate (bpm), heart_rate_variability (ms RMSSD)
+    ppg   → heart_rate (bpm), heart_rate_variability (ms RMSSD)
     resp  → breath_rate (bpm), breath_amp_min, breath_amp_max
     eda   → eda_level (moyenne glissante 10s)
     acc_x + acc_z (les deux requis) → aim_angle (degrés)
     emg   → shot_triggered (bool), shot_power (0–1)
 
 Pour changer les capteurs branchés, modifier ACTIVE_PORTS et CHANNEL_NAMES.
-Ports disponibles : A1=acc_x  A2=acc_z  A3=resp  A4=pzt  A5=eda  A6=emg
+Ports disponibles : A1=acc_x  A2=acc_z  A3=resp  A4=ppg  A5=eda  A6=emg
 """
 
 import math
@@ -43,7 +43,7 @@ PLOT_INTERVAL  = 0.2
 
 class PeakTracker:
     """Détecte les pics dans un signal glissant.
-    Pour PZT : calcule heart_rate et heart_rate_variability.
+    Pour PPG : calcule heart_rate et heart_rate_variability.
     Pour RESP : calcule breath_rate, breath_amp_min, breath_amp_max.
     """
 
@@ -118,7 +118,7 @@ class PeakTracker:
 
 
 _TRACKER_PARAMS = {
-    "pzt":  {"refractory_sec": 0.35, "min_interval": 0.4,  "max_interval": 1.5},
+    "ppg":  {"refractory_sec": 0.35, "min_interval": 0.4,  "max_interval": 1.5},
     "resp": {"refractory_sec": 2.0,  "min_interval": 2.0,  "max_interval": 10.0},
 }
 
@@ -136,7 +136,7 @@ class SimpleProcessor:
         self._baselines  = {}
         self.calibrated  = False
 
-        # Trackers pics (PZT et RESP)
+        # Trackers pics (PPG et RESP)
         self._trackers = {
             ch: PeakTracker(frequency, **_TRACKER_PARAMS[ch])
             for ch in channel_names if ch in _TRACKER_PARAMS
@@ -159,10 +159,10 @@ class SimpleProcessor:
 
         out = {"type": "data"}
 
-        if "pzt" in self.channels:
-            self._trackers["pzt"].update(frame["pzt"])
-            out["heart_rate"]             = round(self._trackers["pzt"].rate, 1)
-            out["heart_rate_variability"] = round(self._trackers["pzt"].hrv_ms, 1)
+        if "ppg" in self.channels:
+            self._trackers["ppg"].update(frame["ppg"])
+            out["heart_rate"]             = round(self._trackers["ppg"].rate, 1)
+            out["heart_rate_variability"] = round(self._trackers["ppg"].hrv_ms, 1)
 
         if "resp" in self.channels:
             self._trackers["resp"].update(frame["resp"])
@@ -180,7 +180,9 @@ class SimpleProcessor:
             out["aim_angle"] = round(math.degrees(math.atan2(dx, dz)), 1)
 
         if "emg" in self.channels:
-            out["shot_triggered"] = self._process_emg(frame["emg"])
+            shot_start, shot_end = self._process_emg(frame["emg"])
+            out["shot_start"] = shot_start
+            out["shot_end"]   = shot_end
 
         return out
 
@@ -209,7 +211,7 @@ class SimpleProcessor:
                 vals = self._cal_data["emg"]
                 emg_mean = sum(vals) / len(vals)
                 emg_std  = math.sqrt(sum((v - emg_mean)**2 for v in vals) / len(vals))
-                self._emg_threshold = emg_mean + 20 * emg_std
+                self._emg_threshold = emg_mean + 15 * emg_std
                 print(f"[Calibration OK] emg: seuil={self._emg_threshold:.0f} (moy={emg_mean:.0f}, std={emg_std:.1f})")
 
             # Amplitude de référence pour les trackers
@@ -243,21 +245,28 @@ class SimpleProcessor:
         }
 
     # ── EMG → tir ────────────────────────────────────────────────────────
-    def _process_emg(self, raw) -> bool:
+    def _process_emg(self, raw) -> tuple[bool, bool]:
         if self._emg_refractory > 0:
             self._emg_refractory -= 1
-            return False
+            return False, False
+
+        shot_start = False
+        shot_end   = False
+
         if raw > self._emg_threshold:
+            if not self._emg_contracting:
+                shot_start = True
             self._emg_contracting  = True
             self._emg_below_frames = 0
         elif self._emg_contracting:
             self._emg_below_frames += 1
-            if self._emg_below_frames >= 50:   # 0.5s à 100Hz
+            if self._emg_below_frames >= 20:   # 0.2s à 100Hz
                 self._emg_contracting  = False
                 self._emg_below_frames = 0
                 self._emg_refractory   = 100   # 1s à 100Hz
-                return True
-        return False
+                shot_end = True
+
+        return shot_start, shot_end
 
 
 # ── Classe Acquisition PLUX ─────────────────────────────────────────────
@@ -286,12 +295,14 @@ class Acquisition(plux.SignalsDev):
             self.bridge.send(result)
 
         if result.get("type") == "data":
-            if result.get("shot_triggered"):
-                print(f"[TIR]")
+            if result.get("shot_start"):
+                print("[TIR DEBUT]")
+            elif result.get("shot_end"):
+                print("[TIR FIN]")
             elif nSeq % (self.frequency * 2) == 0:
                 parts = []
                 for key, val in result.items():
-                    if key in ("type", "shot_triggered"):
+                    if key in ("type", "shot_start", "shot_end"):
                         continue
                     parts.append(f"{key}={val}")
                 print(f"[Live] {'  '.join(parts)}")

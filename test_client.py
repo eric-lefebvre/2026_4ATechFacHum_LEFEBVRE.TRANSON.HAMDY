@@ -47,7 +47,9 @@ async def main():
                     print()
 
                 elif t == "data":
-                    if msg["shot_triggered"]:
+                    if msg["shot_start"]:
+                        print(f"\n  ► CONTRACTION")
+                    elif msg["shot_end"]:
                         print(f"\n  ★ TIR !  stress={msg['stress']:.2f}")
                     else:
                         stress_bar = _bar(msg["stress"])

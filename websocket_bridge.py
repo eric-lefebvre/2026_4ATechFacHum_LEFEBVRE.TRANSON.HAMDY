@@ -77,7 +77,7 @@ class WebSocketBridge:
             return
 
         msg_type = data.get("type", "data")
-        shot     = data.get("shot_triggered", False)
+        shot     = data.get("shot_start", False) or data.get("shot_end", False)
 
         # Limite de fréquence — bypass pour les messages de calibration et les tirs
         now = time.monotonic()

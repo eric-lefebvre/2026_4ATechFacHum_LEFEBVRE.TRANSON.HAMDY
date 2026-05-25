@@ -16,7 +16,7 @@ DEVICE_ADDRESS  = "98:D3:91:FD:69:DD"
 FREQUENCY       = 100   # Hz
 CALIBRATION_SEC = 30    # secondes de repos pour mesurer les baselines
 ACTIVE_PORTS    = [1, 2, 3, 4]
-CHANNEL_NAMES  = ["resp", "emg", "eda", "pzt"]
+CHANNEL_NAMES  = ["resp", "emg", "eda", "ppg"]
 WINDOW_SAMPLES = FREQUENCY * 5   # fenêtre glissante : 5 dernières secondes
 PLOT_INTERVAL  = 0.2              # rafraîchissement du graphique (secondes)
 # ───────────────────────────────────────────────────────────────────────
@@ -58,8 +58,10 @@ class Acquisition(plux.SignalsDev):
                   f"EDA baseline={result['eda_baseline']:.1f}")
 
         elif msg_type == "data":
-            if result["shot_triggered"]:
-                print(f"[TIR] stress={result['stress']:.2f}")
+            if result["shot_start"]:
+                print("[TIR DEBUT]")
+            elif result["shot_end"]:
+                print(f"[TIR FIN]  stress={result['stress']:.2f}")
             elif nSeq % (self.frequency * 2) == 0:
                 print(f"[Live] stress={result['stress']:.2f}  "
                       f"FC={result['heart_rate']:.0f}bpm  "

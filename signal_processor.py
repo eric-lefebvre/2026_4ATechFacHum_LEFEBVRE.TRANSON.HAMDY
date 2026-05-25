@@ -18,7 +18,8 @@ Sortie  : messages typés pour Unity
         eda_baseline float  range EDA au repos (p90-p10)
 
     type = "data"                        (chaque trame après la calibration)
-        shot_triggered          bool
+        shot_start              bool    (True 1 frame au début de la contraction)
+        shot_end                bool    (True 1 frame à la fin du relâchement)
         stress                  0–1
         heart_rate              bpm
         heart_rate_variability  ms (RMSSD)
@@ -43,11 +44,11 @@ FREQUENCY          = 100   # Hz
 CALIBRATION_SEC    = 60    # secondes de repos pour établir les baselines
 
 
-EMG_RELEASE_FRAMES    = 50   # frames sous le seuil pour déclencher le tir (0.5s)
+EMG_RELEASE_FRAMES    = 20   # frames sous le seuil pour déclencher le tir (0.2s)
 EMG_REFRACTORY_FRAMES = 100  # frames d'insensibilité après un tir (1s)
 
 EDA_WINDOW_SEC     = 10
-PZT_WINDOW_SEC     = 5
+PPG_WINDOW_SEC     = 5
 RESP_WINDOW_SEC    = 15
 
 # ── Classe principale ───────────────────────────────────────────────────
@@ -89,11 +90,11 @@ class SignalProcessor:
         # ── EDA ─────────────────────────────────────────────────────────
         self._eda_buf = deque(maxlen=frequency * EDA_WINDOW_SEC)
 
-        # ── PZT (pouls + HRV) ───────────────────────────────────────────
-        self._pzt_buf                  = deque(maxlen=frequency * PZT_WINDOW_SEC)
-        self._pzt_rising               = False
-        self._pzt_peaks                = deque(maxlen=20)
-        self._pzt_last_peak_frame      = 0
+        # ── PPG (pouls + HRV) ───────────────────────────────────────────
+        self._ppg_buf                  = deque(maxlen=frequency * PPG_WINDOW_SEC)
+        self._ppg_rising               = False
+        self._ppg_peaks                = deque(maxlen=20)
+        self._ppg_last_peak_frame      = 0
         self._heart_rate_bpm           = 70.0
         self._rr_intervals             = deque(maxlen=20)
 
@@ -115,16 +116,17 @@ class SignalProcessor:
         if not self.calibrated:
             return self._run_calibration(frame)
 
-        shot_triggered = self._process_emg(frame["emg"])
+        shot_start, shot_end = self._process_emg(frame["emg"])
         # aim_angle    = self._process_acc(frame["acc_x"], frame["acc_z"])  # ACC désactivé
-        heart_rate     = self._process_pzt(frame["pzt"])
+        heart_rate     = self._process_ppg(frame["ppg"])
         breath_rate    = self._process_resp(frame["resp"])
         stress         = self._process_stress(frame["eda"], heart_rate, breath_rate)
         hrv_ms         = _rmssd(list(self._rr_intervals)) * 1000
 
         return {
-            "type":                   "data",
-            "shot_triggered":         shot_triggered,
+            "type":       "data",
+            "shot_start": shot_start,
+            "shot_end":   shot_end,
             # "shot_power":           supprimé — recalibrer d'abord
             # "aim_angle":            supprimé — ACC désactivé
             "stress":                 round(stress, 3),
@@ -144,7 +146,7 @@ class SignalProcessor:
         # self._cal_accz.append(frame["acc_z"])
         self._cal_count += 1
 
-        self._process_pzt(frame["pzt"])
+        self._process_ppg(frame["ppg"])
         self._process_resp(frame["resp"])
 
         if self._cal_count % self.freq != 0:
@@ -158,7 +160,7 @@ class SignalProcessor:
         if self._cal_count >= self._cal_target:
             emg_mean = _mean(self._cal_emg)
             emg_std  = math.sqrt(sum((v - emg_mean)**2 for v in self._cal_emg) / len(self._cal_emg))
-            self._emg_threshold      = emg_mean + 20 * emg_std
+            self._emg_threshold      = emg_mean + 15 * emg_std
             self._eda_baseline       = _mean(self._cal_eda) or 1.0
             self._eda_baseline_range = _range90(self._cal_eda) or 1.0
             # self._acc_x_neutral = _mean(self._cal_accx)   # ACC désactivé
@@ -195,11 +197,17 @@ class SignalProcessor:
         }
 
     # ── EMG → tir ───────────────────────────────────────────────────────
-    def _process_emg(self, raw) -> bool:
+    def _process_emg(self, raw) -> tuple[bool, bool]:
         if self._emg_refractory > 0:
             self._emg_refractory -= 1
-            return False
+            return False, False
+
+        shot_start = False
+        shot_end   = False
+
         if raw > self._emg_threshold:
+            if not self._emg_contracting:
+                shot_start = True
             self._emg_contracting  = True
             self._emg_below_frames = 0
         elif self._emg_contracting:
@@ -208,8 +216,9 @@ class SignalProcessor:
                 self._emg_contracting  = False
                 self._emg_below_frames = 0
                 self._emg_refractory   = EMG_REFRACTORY_FRAMES
-                return True
-        return False
+                shot_end = True
+
+        return shot_start, shot_end
 
     # ── ACC → angle de visée (désactivé) ────────────────────────────────
     # def _process_acc(self, raw_x, raw_z):
@@ -217,46 +226,46 @@ class SignalProcessor:
     #     dz = raw_z - self._acc_z_neutral
     #     return math.degrees(math.atan2(dx, dz))
 
-    # ── PZT → fréquence cardiaque + HRV ─────────────────────────────────
-    def _process_pzt(self, raw):
-        self._pzt_buf.append(raw)
+    # ── PPG → fréquence cardiaque + HRV ─────────────────────────────────
+    def _process_ppg(self, raw):
+        self._ppg_buf.append(raw)
 
-        if len(self._pzt_buf) < 10:
+        if len(self._ppg_buf) < 10:
             return self._heart_rate_bpm
 
-        buf_list   = list(self._pzt_buf)
+        buf_list   = list(self._ppg_buf)
         buf_sorted = sorted(buf_list)
         n          = len(buf_sorted)
-        median_pzt = buf_sorted[n // 2]
-        amp_pzt    = buf_sorted[int(n * 0.9)] - buf_sorted[int(n * 0.1)]
-        mean_pzt   = sum(buf_list) / n
-        std_pzt    = math.sqrt(sum((v - mean_pzt) ** 2 for v in buf_list) / n)
-        if std_pzt < 20:
+        median_ppg = buf_sorted[n // 2]
+        amp_ppg    = buf_sorted[int(n * 0.9)] - buf_sorted[int(n * 0.1)]
+        mean_ppg   = sum(buf_list) / n
+        std_ppg    = math.sqrt(sum((v - mean_ppg) ** 2 for v in buf_list) / n)
+        if std_ppg < 20:
             return 0.0
-        peak_threshold = median_pzt + 0.4 * amp_pzt
+        peak_threshold = median_ppg + 0.4 * amp_ppg
 
-        if raw > peak_threshold and not self._pzt_rising:
-            self._pzt_rising = True
-        elif raw < peak_threshold and self._pzt_rising:
-            self._pzt_rising = False
-            frames_since_last = self._frame_count - self._pzt_last_peak_frame
+        if raw > peak_threshold and not self._ppg_rising:
+            self._ppg_rising = True
+        elif raw < peak_threshold and self._ppg_rising:
+            self._ppg_rising = False
+            frames_since_last = self._frame_count - self._ppg_last_peak_frame
             if frames_since_last < self.freq * 0.35:
                 return self._heart_rate_bpm
-            self._pzt_last_peak_frame = self._frame_count
+            self._ppg_last_peak_frame = self._frame_count
             t = self._frame_count / self.freq
 
-            if self._pzt_peaks:
-                interval = t - self._pzt_peaks[-1]
+            if self._ppg_peaks:
+                interval = t - self._ppg_peaks[-1]
                 if 0.4 < interval < 1.5:
-                    self._pzt_peaks.append(t)
+                    self._ppg_peaks.append(t)
                     self._rr_intervals.append(interval)
-                    self._pzt_last_valid_rr_frame = self._frame_count
-                    if len(self._pzt_peaks) >= 2:
-                        intervals = [self._pzt_peaks[i+1] - self._pzt_peaks[i]
-                                     for i in range(len(self._pzt_peaks)-1)]
+                    self._ppg_last_valid_rr_frame = self._frame_count
+                    if len(self._ppg_peaks) >= 2:
+                        intervals = [self._ppg_peaks[i+1] - self._ppg_peaks[i]
+                                     for i in range(len(self._ppg_peaks)-1)]
                         self._heart_rate_bpm = 60.0 / _mean(intervals)
             else:
-                self._pzt_peaks.append(t)
+                self._ppg_peaks.append(t)
 
         return self._heart_rate_bpm
 
