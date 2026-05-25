@@ -12,6 +12,10 @@ Les capteurs mesurent le stress du joueur → un score [0–1] est calculé → 
 - BITalino Core BT couplé en Bluetooth (`98:D3:91:FD:69:DD`)
 - Unity (projet séparé)
 
+## GIT UNITY
+
+https://github.com/mayahamdy/2026_4ATechFacHum_LEFEBVRE.TRANSON.HAMDY
+
 ## Installation
 
 ```powershell
