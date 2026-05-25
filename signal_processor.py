@@ -49,7 +49,7 @@ EMG_REFRACTORY_FRAMES = 100  # frames d'insensibilité après un tir (1s)
 
 EDA_WINDOW_SEC     = 10
 PPG_WINDOW_SEC     = 5
-RESP_WINDOW_SEC    = 15
+RESP_WINDOW_SEC    = 8
 ACC_WINDOW_FRAMES  = 50   # 0.5s à 100Hz
 ACC_MOVEMENT_MAX   = 1.7  # score normalisé → 1.0
 
@@ -275,7 +275,6 @@ class SignalProcessor:
                 if 0.4 < interval < 1.5:
                     self._ppg_peaks.append(t)
                     self._rr_intervals.append(interval)
-                    self._ppg_last_valid_rr_frame = self._frame_count
                     if len(self._ppg_peaks) >= 2:
                         intervals = [self._ppg_peaks[i+1] - self._ppg_peaks[i]
                                      for i in range(len(self._ppg_peaks)-1)]
@@ -292,18 +291,22 @@ class SignalProcessor:
         if len(self._resp_buf) < 20:
             return self._breath_rate
 
-        buf_sorted = sorted(self._resp_buf)
-        n = len(buf_sorted)
-        median_resp = buf_sorted[n // 2]
-        amp_resp    = buf_sorted[int(n * 0.9)] - buf_sorted[int(n * 0.1)]
-        threshold   = median_resp + 0.3 * amp_resp
+        buf_list = list(self._resp_buf)
+        n        = len(buf_list)
+        mean_resp = sum(buf_list) / n
+        std_resp  = math.sqrt(sum((v - mean_resp) ** 2 for v in buf_list) / n)
+        amp_resp  = std_resp
+        threshold = mean_resp + 0.8 * std_resp
+
+        if self._frame_count % 100 == 0:
+            print(f"[RESP debug] raw={raw}  mean={mean_resp:.0f}  std={std_resp:.1f}  thr={threshold:.0f}  rising={self._resp_rising}  rate={self._breath_rate:.1f}")
 
         if raw > threshold and not self._resp_rising:
             self._resp_rising = True
         elif raw < threshold and self._resp_rising:
             self._resp_rising = False
             frames_since_last = self._frame_count - self._resp_last_peak_frame
-            if frames_since_last < self.freq * 2.0:
+            if frames_since_last < self.freq * 1.0:
                 return self._breath_rate
             self._resp_last_peak_frame = self._frame_count
             t = self._frame_count / self.freq
@@ -315,7 +318,7 @@ class SignalProcessor:
 
             if self._resp_peaks:
                 interval = t - self._resp_peaks[-1]
-                if 2.0 < interval < 10.0:
+                if 1.0 < interval < 10.0:
                     self._resp_peaks.append(t)
                     if len(self._resp_peaks) >= 2:
                         intervals = [self._resp_peaks[i+1] - self._resp_peaks[i]
@@ -335,14 +338,14 @@ class SignalProcessor:
                      if self._eda_baseline_range > 1 else 0.0
 
         hr_stress = min(1.0, max(0.0,
-            (heart_rate - self._hr_rest) / (self._hr_rest * 0.5)))
+            (heart_rate - self._hr_rest) / (self._hr_rest * 0.25)))
 
         hrv_now    = _rmssd(list(self._rr_intervals))
         hrv_stress = min(1.0, max(0.0,
-            1.0 - hrv_now / self._hrv_rest)) if self._hrv_rest > 0 else 0.0
+            1.0 - hrv_now / (self._hrv_rest * 0.5))) if self._hrv_rest > 0 else 0.0
 
         resp_stress = min(1.0, max(0.0,
-            (breath_rate - self._resp_rest) / (self._resp_rest * 0.5)))
+            (breath_rate - self._resp_rest) / (self._resp_rest * 0.25)))
 
         return (0.35 * hr_stress
               + 0.30 * hrv_stress
