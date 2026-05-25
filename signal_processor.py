@@ -47,7 +47,10 @@ CALIBRATION_SEC    = 60    # secondes de repos pour établir les baselines
 EMG_RELEASE_FRAMES    = 20   # frames sous le seuil de relâchement pour déclencher le tir (0.2s)
 EMG_REFRACTORY_FRAMES = 100  # frames d'insensibilité après un tir (1s)
 
-EDA_WINDOW_SEC     = 10
+EDA_SLOW_SEC          = 60   # buffer pour supprimer le drift d'électrode
+EDA_CHECK_SEC         = 5    # buffer pour détecter si branché
+EDA_SCR_REFERENCE     = 50   # amplitude phasique (ADC) = stress maximal
+EDA_NOT_CONNECTED_STD = 5    # std < seuil → capteur non branché
 PPG_WINDOW_SEC     = 5
 RESP_WINDOW_SEC    = 8
 ACC_WINDOW_FRAMES  = 50   # 0.5s à 100Hz
@@ -92,7 +95,10 @@ class SignalProcessor:
         self._emg_refractory        = 0
 
         # ── EDA ─────────────────────────────────────────────────────────
-        self._eda_buf = deque(maxlen=frequency * EDA_WINDOW_SEC)
+        self._eda_short_buf  = deque(maxlen=frequency * EDA_CHECK_SEC)
+        self._eda_slow_buf   = deque(maxlen=frequency * EDA_SLOW_SEC)
+        self._eda_phasic_buf = deque(maxlen=frequency * EDA_CHECK_SEC)
+        self._eda_scr_amp    = 0.0
 
         # ── PPG (pouls + HRV) ───────────────────────────────────────────
         self._ppg_buf                  = deque(maxlen=frequency * PPG_WINDOW_SEC)
@@ -140,7 +146,8 @@ class SignalProcessor:
             "breath_rate":            round(breath_rate, 1),
             "breath_amp_min":         round(self._resp_amp_min, 1),
             "breath_amp_max":         round(self._resp_amp_max, 1),
-            "eda_level":              round(_mean(self._eda_buf), 1),
+            "eda_level":              round(_mean(self._eda_short_buf), 1),
+            "eda_scr_amp":            round(self._eda_scr_amp, 1),
         }
 
     # ── Calibration repos ───────────────────────────────────────────────
@@ -166,9 +173,11 @@ class SignalProcessor:
             emg_mean = _mean(self._cal_emg)
             emg_std  = math.sqrt(sum((v - emg_mean)**2 for v in self._cal_emg) / len(self._cal_emg))
             self._emg_threshold         = emg_mean + 20 * emg_std
-            self._emg_release_threshold = emg_mean + 0.25 * 20 * emg_std
+            self._emg_release_threshold = emg_mean + 0.5 * 20 * emg_std
             self._eda_baseline       = _mean(self._cal_eda) or 1.0
             self._eda_baseline_range = _range90(self._cal_eda) or 1.0
+            for v in self._cal_eda:
+                self._eda_slow_buf.append(v)
             # self._acc_x_neutral = _mean(self._cal_accx)   # ACC désactivé
             # self._acc_z_neutral = _mean(self._cal_accz)
             self._hr_rest   = _mean(self._cal_hr_samples) or 70.0
@@ -329,13 +338,32 @@ class SignalProcessor:
 
         return self._breath_rate
 
+    # ── EDA → composante phasique (SCR) ─────────────────────────────────
+    def _process_eda(self, raw) -> float:
+        self._eda_short_buf.append(raw)
+        self._eda_slow_buf.append(raw)
+
+        # Capteur non branché : signal plat
+        if len(self._eda_short_buf) == self._eda_short_buf.maxlen:
+            short_list = list(self._eda_short_buf)
+            mean_s = sum(short_list) / len(short_list)
+            std_s  = math.sqrt(sum((v - mean_s) ** 2 for v in short_list) / len(short_list))
+            if std_s < EDA_NOT_CONNECTED_STD:
+                return 0.0
+
+        slow_mean = sum(self._eda_slow_buf) / len(self._eda_slow_buf)
+        phasic    = raw - slow_mean
+        self._eda_phasic_buf.append(phasic)
+
+        if len(self._eda_phasic_buf) < self.freq * 2:
+            return 0.0
+
+        self._eda_scr_amp = max(0.0, max(self._eda_phasic_buf))
+        return min(1.0, self._eda_scr_amp / EDA_SCR_REFERENCE)
+
     # ── Stress combiné (WESAD-inspired) ─────────────────────────────────
     def _process_stress(self, raw_eda, heart_rate, breath_rate):
-        self._eda_buf.append(raw_eda)
-
-        eda_range  = _range90(self._eda_buf)
-        eda_stress = min(1.0, max(0.0, eda_range / self._eda_baseline_range)) \
-                     if self._eda_baseline_range > 1 else 0.0
+        eda_stress = self._process_eda(raw_eda)
 
         hr_stress = min(1.0, max(0.0,
             (heart_rate - self._hr_rest) / (self._hr_rest * 0.25)))
